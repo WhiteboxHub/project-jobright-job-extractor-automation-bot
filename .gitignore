@@ -1,0 +1,9 @@
+venv/
+venvv/
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+*.log
+.env
+jobright_jobs.json

@@ -1,0 +1,26 @@
+{
+  "credentials": {
+    "email": "ramsai54164@gmail.com",
+    "password": "ramsai@1219"
+  },
+  "_comment": "Jobright.ai scraper config — mirrors hiring_cafe.json structure exactly",
+  "search_keywords": [
+    "Python Developer",
+    "AI Engineer",
+    "Machine Learning Engineer"
+  ],
+  "location": "United States",
+  "random_pause_min_sec": 3.0,
+  "random_pause_max_sec": 7.0,
+  "scroll_step_min_sec": 1.5,
+  "scroll_step_max_sec": 3.5,
+  "step2_pause_min_sec": 2.0,
+  "step2_pause_max_sec": 5.0,
+  "step2_page_settle_min_sec": 2.0,
+  "step2_page_settle_max_sec": 4.0,
+  "step2_shuffle_pending": false,
+  "step2_break_every_n": 20,
+  "step2_long_break_min_sec": 15.0,
+  "step2_long_break_max_sec": 30.0,
+  "step2_mouse_jitter": false
+}

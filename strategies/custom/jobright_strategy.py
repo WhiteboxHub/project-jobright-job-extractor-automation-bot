@@ -24,6 +24,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+from core.logger import logger
+from core.browser import browser_service
+from core.safe_actions import SafeActions
+from core.human_behavior import HumanBehavior
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SELECTORS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,13 +39,16 @@ JOB_LINK_SELECTOR = 'a[href*="/jobs/info/"]'
 
 # Apply button on job detail page (opens ATS in new tab)
 APPLY_NOW_BUTTON_XPATH = """
-//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply now')]
+//button[@id='apply-now-button-id']
+| //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply now')]
 | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply on employer')]
 | //button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]
 | //a[@class and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]
 """
 
 APPLY_BUTTON_FALLBACK_XPATHS = [
+    "//button[contains(@class, 'index_applyButton')]",
+    "//a[contains(@class, 'index_applyButton')]",
     "//a[@aria-label and contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'apply')]",
     "//*[@data-testid and contains(translate(@data-testid,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'apply')]",
     "//button[contains(@id, 'apply-button')]",
@@ -48,6 +56,8 @@ APPLY_BUTTON_FALLBACK_XPATHS = [
     "//a[@target='_blank' and not(contains(@href,'jobright.ai')) and starts-with(@href,'http')]",
     "//a[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'view job')]",
 ]
+
+ORIGINAL_JOB_POST_LINK_XPATH = "//a[contains(@class, 'index_origin') or contains(., 'Original Job Post')]"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ATS PLATFORM DETECTION  (same list as Hiring Cafe)
@@ -264,17 +274,13 @@ def _build_search_url_with_location(
     location: str = "",
     base_url: str = "https://jobright.ai",
 ) -> str:
-    slug = keyword.strip().lower()
-    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-    slug = re.sub(r'\s+', '-', slug).strip('-')
-
-    if location:
-        loc_slug = location.strip().lower()
-        loc_slug = re.sub(r'[^a-z0-9\s-]', '', loc_slug)
-        loc_slug = re.sub(r'\s+', '-', loc_slug).strip('-')
-        return f"{base_url}/jobs/{slug}-jobs-in-{loc_slug}"
-
-    return f"{base_url}/jobs/{slug}-jobs"
+    """
+    Use Jobright's actual search endpoint which returns ALL matching jobs
+    (vs. slug URLs which only return ~7 cached results).
+    Pattern: https://jobright.ai/jobs/search?value={keyword}&searchType=job_title&country=US
+    """
+    encoded_kw = quote(keyword.strip(), safe="")
+    return f"{base_url}/jobs/search?value={encoded_kw}&searchType=job_title&country=US"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -295,7 +301,6 @@ class JobrightStrategy:
         self,
         driver,
         config_override: dict | None = None,
-        date_filter_override=None,
     ):
         config = config_override or _load_jobright_config()
 
@@ -307,19 +312,21 @@ class JobrightStrategy:
         else:
             env_kw = os.environ.get("JOBRIGHT_SEARCH_KEYWORD", "").strip()
             keywords = [env_kw] if env_kw else ["Software Engineer"]
+
         # Credentials
         self._credentials = config.get("credentials", {})
         self._is_logged_in = False
-
         self._search_keywords = keywords or ["Software Engineer"]
-
-        # Location
         self._location = config.get("location", "").strip()
 
         self.driver = driver
         self.base_url = "https://jobright.ai"
+        
+        # Core components
+        self.safe = SafeActions(driver)
+        self.human = HumanBehavior(driver)
 
-        # Timing settings (mirrors Hiring Cafe settings keys)
+        # Timing settings
         self._random_pause_lo    = float(config.get("random_pause_min_sec", 3.0))
         self._random_pause_hi    = float(config.get("random_pause_max_sec", 7.0))
         self._scroll_step_lo     = float(config.get("scroll_step_min_sec", 1.5))
@@ -334,10 +341,9 @@ class JobrightStrategy:
         self._step2_long_break_hi= float(config.get("step2_long_break_max_sec", 30.0))
         self._step2_mouse_jitter = bool(config.get("step2_mouse_jitter", False))
 
-        print(
-            f"✅ JobrightStrategy initialized "
-            f"(keywords={self._search_keywords}, location='{self._location}', "
-            f"pause={self._random_pause_lo}–{self._random_pause_hi}s)"
+        logger.info(
+            f"JobrightStrategy initialized "
+            f"(keywords={self._search_keywords}, location='{self._location}')"
         )
 
     def login(self) -> bool:
@@ -353,7 +359,27 @@ class JobrightStrategy:
         password = self._credentials["password"]
 
         try:
-            print(f"🔐 Attempting login for {email}...")
+            logger.info(f"🔐 Attempting login for {email}...")
+
+            # ── Check if already logged in first ──────────────────────────────
+            self.driver.get(self.base_url)
+            time.sleep(3)
+            
+            is_logged_in = False
+            for av_xpath in [
+                "//*[contains(@class,'avatar')]",
+                "//button[contains(@aria-label,'account')]",
+                "//img[contains(@alt,'avatar')]",
+                "//*[contains(@class,'Sidebar_sidebar')]//div[contains(@class,'index_user')]",
+            ]:
+                if self.driver.find_elements(By.XPATH, av_xpath):
+                    is_logged_in = True
+                    break
+            
+            if is_logged_in:
+                logger.info("✅ Already logged in (session active)")
+                self._is_logged_in = True
+                return True
 
             # ── Strategy 1: navigate directly to the login page ───────────────
             self.driver.get(f"{self.base_url}/login")
@@ -361,7 +387,7 @@ class JobrightStrategy:
 
             # If redirected (already logged in / no /login route) try homepage modal
             if "/login" not in self.driver.current_url.lower():
-                print("[LOGIN] /login redirected — trying homepage SIGN IN modal...")
+                logger.info("[LOGIN] /login redirected — trying homepage SIGN IN modal...")
                 self.driver.get(self.base_url)
                 time.sleep(2)
                 # Look for any SIGN IN / Log In link
@@ -398,7 +424,7 @@ class JobrightStrategy:
                     continue
 
             if not email_field:
-                print("❌ Login failed: email input not found")
+                logger.error("❌ Login failed: email input not found")
                 return False
 
             email_field.clear()
@@ -419,7 +445,7 @@ class JobrightStrategy:
                     continue
 
             if not pw_field:
-                print("❌ Login failed: password input not found")
+                logger.error("❌ Login failed: password input not found")
                 return False
 
             pw_field.clear()
@@ -446,7 +472,7 @@ class JobrightStrategy:
                     continue
 
             if not submitted:
-                print("[LOGIN] Submit button not found — pressing Enter on password field")
+                logger.info("[LOGIN] Submit button not found — pressing Enter on password field")
                 pw_field.send_keys("\n")
 
             # ── Verify login ──────────────────────────────────────────────────
@@ -496,68 +522,83 @@ class JobrightStrategy:
 
     def _apply_date_filter(self) -> bool:
         """
-        Apply 'Date Posted: Last 24 hours' filter on the Jobright search results page.
-        Uses the exact XPath provided from the live site:
-          /html/body/div[2]/div/div/div[2]/label[1]/span[2]
-        Selector: body > div.ant-dropdown ... > label.ant-radio-wrapper:first-child > span:nth-child(2)
+        Apply 'Last 24 hours' date filter.
+        Must be called BEFORE _scroll_until_end() so only filtered jobs load.
+        Uses only text-based XPaths — no absolute paths that break on DOM changes.
         """
-        try:
-            # Step 1: find and click the Date Posted filter button
-            date_filter_xpaths = [
-                "//button[.//span[contains(text(),'Date Posted')]]",
-                "//span[contains(text(),'Date Posted')]/ancestor::button",
-                "//*[contains(@class,'filter') and contains(text(),'Date')]",
-                "//span[normalize-space(text())='Date Posted']",
-                "//*[contains(text(),'Date Posted')]",
-            ]
-            clicked_filter = False
-            for xpath in date_filter_xpaths:
-                try:
-                    btn = WebDriverWait(self.driver, 4).until(
-                        EC.element_to_be_clickable((By.XPATH, xpath))
-                    )
-                    btn.click()
-                    time.sleep(1)
-                    clicked_filter = True
-                    print("🗓️ Clicked Date Posted filter button")
-                    break
-                except Exception:
+        MAX_ATTEMPTS = 3
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                # Step 1: Open the Date Posted dropdown
+                date_btn_xpaths = [
+                    "//button[.//span[contains(text(),'Date Posted')]]",
+                    "//button[contains(normalize-space(.),'Date Posted')]",
+                    "//span[normalize-space(text())='Date Posted']",
+                    "//*[contains(normalize-space(text()),'Date Posted')]",
+                ]
+                clicked_filter = False
+                for xpath in date_btn_xpaths:
+                    try:
+                        btn = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.XPATH, xpath))
+                        )
+                        btn.click()
+                        time.sleep(1.5)
+                        clicked_filter = True
+                        print(f"  [DateFilter] Opened dropdown (attempt {attempt})")
+                        break
+                    except Exception:
+                        continue
+
+                if not clicked_filter:
+                    print(f"  [DateFilter] Dropdown not found (attempt {attempt}/{MAX_ATTEMPTS})")
+                    time.sleep(2)
                     continue
 
-            if not clicked_filter:
-                print("⚠️ Could not find Date Posted filter button — skipping filter")
-                return False
+                # Step 2: Click the 24-hour radio — text-based only, no absolute XPath
+                radio_xpaths = [
+                    "//label[contains(., 'Past 24 hours')]",
+                    "//span[contains(text(), 'Past 24 hours')]",
+                    "//label[contains(normalize-space(.),'24')]",
+                    "//span[contains(normalize-space(text()),'24 hour')]",
+                    "//span[contains(normalize-space(text()),'Last 24')]",
+                    "//*[contains(normalize-space(text()),'Past 24')]",
+                    "//*[contains(normalize-space(text()),'24 Hours')]",
+                    # Ant Design specific
+                    "//label[contains(@class,'ant-radio-wrapper') and .//span[contains(text(),'24')]]",
+                    "//div[contains(@class,'ant-radio-group')]//label[1]",
+                ]
+                clicked_radio = False
+                for xpath in radio_xpaths:
+                    try:
+                        radio = WebDriverWait(self.driver, 3).until(
+                            EC.element_to_be_clickable((By.XPATH, xpath))
+                        )
+                        radio.click()
+                        time.sleep(2)  # let results re-render
+                        clicked_radio = True
+                        print(f"  [DateFilter] Applied 24 h filter via: {xpath[:60]}")
+                        break
+                    except Exception:
+                        continue
 
-            # Step 2: click the '24 hours' / 'Last 24 hours' radio button
-            # Primary: exact XPath from user
-            radio_xpaths = [
-                "/html/body/div[2]/div/div/div[2]/label[1]/span[2]",
-                # Fallbacks by text
-                "//label[.//span[contains(text(),'24')]]/span[contains(@class,'radio')]",
-                "//span[contains(text(),'24 hour')]/ancestor::label",
-                "//*[contains(text(),'Last 24 hours')]",
-                "//*[contains(text(),'24 hours')]",
-                # Ant Design radio group: first label = today/24h
-                "//div[contains(@class,'ant-radio-group')]//label[1]",
-            ]
-            for xpath in radio_xpaths:
-                try:
-                    radio = WebDriverWait(self.driver, 3).until(
-                        EC.element_to_be_clickable((By.XPATH, xpath))
-                    )
-                    radio.click()
-                    time.sleep(1.5)
-                    print("✅ Applied 'Last 24 hours' date filter")
+                if clicked_radio:
                     return True
+
+                print(f"  [DateFilter] Radio not found (attempt {attempt}/{MAX_ATTEMPTS})")
+                # Close the dropdown before retrying
+                try:
+                    self.driver.find_element(By.TAG_NAME, "body").send_keys("\x1b")
+                    time.sleep(1)
                 except Exception:
-                    continue
+                    pass
 
-            print("⚠️ Could not find 24h radio option — skipping filter")
-            return False
+            except Exception as e:
+                print(f"  [DateFilter] Error on attempt {attempt}: {e}")
 
-        except Exception as e:
-            print(f"[WARN] Date filter failed (non-fatal): {e}")
-            return False
+        print("  [DateFilter] All attempts failed — continuing without date filter")
+        return False
 
     # ── Timing helpers ────────────────────────────────────────────────────────
 
@@ -573,7 +614,7 @@ class JobrightStrategy:
             lo, hi = hi, lo
         sec = random.uniform(lo, hi)
         tag = f" ({label})" if label else ""
-        print(f"⏳ Human pause{tag}: {sec:.1f}s")
+        logger.info(f"⏳ Human pause{tag}: {sec:.1f}s")
         time.sleep(sec)
         return sec
 
@@ -675,7 +716,11 @@ class JobrightStrategy:
 
     # ── Infinite scroll ────────────────────────────────────────────────────────
 
-    def _scroll_until_end(self, max_scrolls: int = 150) -> bool:
+    def _scroll_until_end(self, max_scrolls: int = 300) -> bool:
+        """
+        Scroll the inner job-list container on Jobright (#jobs-page-main-content).
+        Jobright uses a fixed-height scrollable div — scrolling window.body does nothing.
+        """
         print(
             f"🔄 Starting infinite scroll "
             f"(step delay {self._scroll_step_lo}–{self._scroll_step_hi}s)..."
@@ -683,6 +728,25 @@ class JobrightStrategy:
         previous_count = 0
         no_change_count = 0
         scroll_attempts = 0
+
+        # Find the scrollable job-list container (Jobright's inner panel)
+        SCROLL_CONTAINER_SELECTORS = [
+            "#jobs-page-main-content",
+            "[class*='jobs-page-main-content']",
+            "[class*='job-list-container']",
+            "[class*='jobList']",
+            "[class*='list-container']",
+        ]
+
+        def _get_scroll_container():
+            for sel in SCROLL_CONTAINER_SELECTORS:
+                try:
+                    els = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                    if els:
+                        return els[0]
+                except Exception:
+                    continue
+            return None  # fallback: page body
 
         while scroll_attempts < max_scrolls:
             if not self._is_session_alive():
@@ -694,7 +758,7 @@ class JobrightStrategy:
 
             if current_count == previous_count:
                 no_change_count += 1
-                if no_change_count >= 3:
+                if no_change_count >= 5:   # increased from 3 to 5 for reliability
                     print(f"✅ No new jobs after {no_change_count} scrolls — reached end.")
                     return True
             else:
@@ -703,13 +767,21 @@ class JobrightStrategy:
             previous_count = current_count
 
             try:
-                last_h = self.driver.execute_script("return document.body.scrollHeight")
-                self._scroll_to_bottom()
+                container = _get_scroll_container()
+                if container:
+                    # Scroll the inner container
+                    scroll_amt = random.randint(1000, 1400)
+                    self.driver.execute_script(
+                        f"arguments[0].scrollTop += {scroll_amt};", container
+                    )
+                else:
+                    # Fallback: scroll the window
+                    self._scroll_to_bottom()
+
+                # Add a small human-like pause after scrolling
+                time.sleep(random.uniform(0.5, 1.2))
                 self._random_scroll_step_pause()
-                new_h = self.driver.execute_script("return document.body.scrollHeight")
-                if new_h == last_h:
-                    self.driver.execute_script("window.scrollBy(0, 600);")
-                    time.sleep(1)
+
             except Exception as e:
                 print(f"⚠️  Scroll error (attempt {scroll_attempts+1}): {e}")
                 if not self._is_session_alive():
@@ -717,7 +789,7 @@ class JobrightStrategy:
                 break
 
             scroll_attempts += 1
-            time.sleep(random.uniform(0.5, 1.5))
+            time.sleep(random.uniform(0.5, 1.0))
 
         print(f"⚠️  Reached max scroll attempts ({max_scrolls}).")
         return False
@@ -1020,6 +1092,16 @@ class JobrightStrategy:
             )
 
         try:
+            # Pass 0: check "Original Job Post" link (most reliable on Jobright)
+            try:
+                origin_links = self.driver.find_elements(By.XPATH, ORIGINAL_JOB_POST_LINK_XPATH)
+                if origin_links:
+                    href = origin_links[0].get_attribute("href")
+                    if accept_url(href):
+                        return href.strip()
+            except Exception:
+                pass
+
             buttons = self.driver.find_elements(By.XPATH, APPLY_NOW_BUTTON_XPATH)
 
             if buttons:
@@ -1148,6 +1230,22 @@ class JobrightStrategy:
                         print(f"[WARN] Click failed for {job_id}: {e}")
 
                 if clicked:
+                    # Jobright specific: handle "Customize Your Resume" modal
+                    try:
+                        # Check for "Apply without Customizing" button
+                        no_customize_xpath = """
+                            //button[contains(@class, 'index_cancelButton')]
+                            | //button[.//p[contains(text(), 'Apply without Customizing')]]
+                            | //button[contains(., 'Apply without Customizing')]
+                        """
+                        no_customize = WebDriverWait(self.driver, 3).until(
+                            EC.element_to_be_clickable((By.XPATH, no_customize_xpath))
+                        )
+                        print("[INFO] Clicking 'Apply without Customizing' modal button...")
+                        no_customize.click()
+                    except Exception:
+                        pass
+
                     # Wait up to 5s for new tab
                     new_handles = []
                     for _ in range(5):
@@ -1230,30 +1328,25 @@ class JobrightStrategy:
     # ── Phase 1 driver ─────────────────────────────────────────────────────────
 
     def find_jobs_for_keyword(self, keyword: str, max_retries: int = 5) -> list[dict]:
-        """
-        Navigate to search URL, wait for React hydration, scroll to end, extract jobs.
-        Mirrors HiringCafeStrategy.find_jobs_for_keyword exactly.
-        """
         search_url = _build_search_url_with_location(keyword, self._location, self.base_url)
 
-        # Pre-warm: visit homepage first (avoids bot fingerprint on cold jump)
+        # Pre-warm
         try:
-            print("🏠 Pre-warming session via homepage...")
+            print("  Pre-warming via homepage...")
             self.driver.get(self.base_url)
             time.sleep(2)
             self._random_human_pause("homepage read")
             self.driver.execute_script("window.scrollTo(0, 300);")
             time.sleep(random.uniform(1, 2))
-            print("✅ Pre-warm complete")
         except Exception as e:
-            print(f"[WARN] Pre-warm failed (non-fatal): {e}")
+            print(f"  [WARN] Pre-warm failed: {e}")
 
         for attempt in range(1, max_retries + 1):
             try:
-                print(f"🌐 Keyword '{keyword}' (attempt {attempt}/{max_retries}) -> {search_url}")
+                print(f"\n  Keyword '{keyword}' (attempt {attempt}/{max_retries})")
+                print(f"  URL: {search_url}")
 
                 if attempt > 1:
-                    print("🏠 Homepage reset before retry...")
                     self.driver.get(self.base_url)
                     time.sleep(2)
                     self._random_human_pause("retry homepage")
@@ -1262,98 +1355,157 @@ class JobrightStrategy:
                 time.sleep(2)
                 self._random_human_pause("search results load")
 
-                # Verify we're on jobright.ai
                 actual_url = self.driver.current_url
                 if "jobright.ai" not in actual_url.lower():
-                    print(f"⚠️  Landed on wrong page: {actual_url}")
-                    time.sleep(2)
-                    self.driver.get(search_url)
-                    time.sleep(5)
-                    actual_url = self.driver.current_url
-                    if "jobright.ai" not in actual_url.lower():
-                        print(f"❌ Still wrong page after retry: {actual_url}")
-                        if attempt < max_retries:
-                            time.sleep(5)
-                            continue
-                        return []
+                    print(f"  Landed on wrong page: {actual_url}")
+                    if attempt < max_retries:
+                        time.sleep(5)
+                        continue
+                    return []
 
                 if self._is_page_blocked():
-                    print(f"⚠️  Blocked/empty page for keyword '{keyword}' (attempt {attempt})")
+                    print(f"  Blocked page (attempt {attempt})")
                     if attempt < max_retries:
                         cooldown = 20 + (attempt * 15)
-                        print(f"⏳ Cooling down {cooldown}s before retry...")
+                        print(f"  Cooling down {cooldown}s...")
                         time.sleep(cooldown)
                         continue
-                    else:
-                        print(f"❌ All {max_retries} attempts blocked for '{keyword}'")
-                        return []
+                    return []
 
                 jobs_loaded = self._wait_for_jobs_to_load(timeout=20)
                 if not jobs_loaded:
-                    print(f"⚠️  No job links appeared for '{keyword}'")
+                    print(f"  No job links appeared for '{keyword}'")
                     if attempt < max_retries:
                         time.sleep(10)
                         continue
                     return []
 
-                # Apply 24h date filter before scrolling
-                self._apply_date_filter()
-                time.sleep(2)  # let the page re-render after filter
+                # ── FIX: Apply date filter BEFORE scrolling ──────────────────
+                filter_ok = self._apply_date_filter()
+                if not filter_ok:
+                    print("  [WARN] Date filter not applied — results may include older jobs")
+                # Wait for page to re-render after filter
+                time.sleep(3)
 
-                self._scroll_until_end(max_scrolls=150)
+                # ── Scroll now (on filtered results) ─────────────────────────
+                self._scroll_until_end(max_scrolls=300)
+
                 jobs = self._extract_job_listings()
-                print(f"✅ Keyword '{keyword}': {len(jobs)} jobs")
+
+                # ── FIX: Apply keyword title filter AFTER extraction ─────────
+                before = len(jobs)
+                jobs = [j for j in jobs if self._matches_keyword_filter(j, keyword)]
+                after = len(jobs)
+                if before != after:
+                    print(f"  Title filter removed {before - after} off-topic jobs "
+                          f"({after}/{before} kept)")
+
+                # ── FIX: Warn if country filter looks wrong ───────────────────
+                us_terms = ("united states", "usa", ", ca", ", ny", ", tx",
+                            ", wa", ", fl", ", il", "remote")
+                us_hits = sum(
+                    1 for j in jobs
+                    if any(t in (j.get("location") or "").lower() for t in us_terms)
+                )
+                if jobs and us_hits < len(jobs) * 0.5:
+                    print(f"  [WARN] Only {us_hits}/{len(jobs)} jobs have US location strings "
+                          f"— country filter may not have applied")
+
+                print(f"  Keyword '{keyword}': {len(jobs)} jobs after all filters")
                 return jobs
 
             except Exception as e:
-                print(f"❌ Error for keyword '{keyword}' (attempt {attempt}): {e}")
-                import traceback; traceback.print_exc()
+                print(f"  Error for '{keyword}' (attempt {attempt}): {e}")
                 if not self._is_session_alive():
-                    print("❌ Chrome session is dead — stopping.")
                     return []
                 if attempt < max_retries:
                     time.sleep(10)
 
         return []
 
+    def find_jobs(self) -> list[dict]:
+        """
+        Collect jobs for all configured keywords.
+        Title filter is now applied per-keyword inside find_jobs_for_keyword().
+        """
+        if len(self._search_keywords) == 1:
+            kw   = self._search_keywords[0]
+            jobs = self.find_jobs_for_keyword(kw)
+            for j in jobs:
+                j["source_keywords"] = [kw]
+            return jobs
+
+        keyword_job_lists = []
+        for i, keyword in enumerate(self._search_keywords):
+            jobs = self.find_jobs_for_keyword(keyword)
+            for j in jobs:
+                j["source_keywords"] = [keyword]
+            keyword_job_lists.append((keyword, jobs))
+            if i < len(self._search_keywords) - 1:
+                self._random_human_pause("next keyword")
+
+        merged = self._merge_jobs_unique(keyword_job_lists)
+        print(f"\n  Unique jobs across all keywords: {len(merged)}")
+        return merged
+
     # ── Keyword filter (boolean, mirrors Hiring Cafe) ─────────────────────────
 
     @staticmethod
     def _matches_keyword_filter(job: dict, keyword: str) -> bool:
-        title_text = (job.get("title") or "").lower()
+        """
+        Job title must contain at least ONE meaningful term from the keyword.
+        """
+        title_text = (job.get("title") or "").lower().strip()
         if not title_text:
             return True
 
-        def _word_present(term: str, text: str) -> bool:
-            t = re.escape(term.lower())
-            return bool(re.search(r'(?<![a-z0-9])' + t + r'(?![a-z0-9])', text, re.IGNORECASE))
+        ABBREV_MAP = {
+            "ml": ["machine learning", "ml"],
+            "ai": ["artificial intelligence", "ai"],
+            "ds": ["data science", "data scientist", "ds"],
+        }
 
         kw_upper = keyword.upper()
-        not_terms = []
-        and_part  = keyword
+        not_terms: list[str] = []
+        and_part = keyword
 
         if " NOT " in kw_upper:
-            not_idx  = kw_upper.index(" NOT ")
+            not_idx    = kw_upper.index(" NOT ")
             not_clause = keyword[not_idx + 5:].strip()
             and_part   = keyword[:not_idx].strip()
-            not_terms  = [
-                t.strip()
-                for t in re.split(r'\b(?:AND|\+)\b', not_clause, flags=re.IGNORECASE)
-                if t.strip()
-            ]
+            not_terms  = [t.strip() for t in re.split(r'\b(?:AND|\+)\b', not_clause, flags=re.IGNORECASE) if t.strip()]
 
-        and_terms = [
-            t.strip()
-            for t in re.split(r'\b(?:AND|\+)\b', and_part, flags=re.IGNORECASE)
-            if t.strip()
-        ]
+        # Build term list: full phrase + individual words
+        terms_to_check: list[str] = []
+        kw_lower = and_part.strip().lower()
 
-        for term in and_terms:
-            if not _word_present(term, title_text):
-                return False
+        # Add full keyword phrase
+        terms_to_check.append(kw_lower)
+
+        # Add individual words (skip stop words)
+        STOP = {"and", "or", "the", "a", "an", "of", "for", "in", "at", "to", "with"}
+        words = [w for w in re.split(r'\s+', kw_lower) if w and w not in STOP]
+        terms_to_check.extend(words)
+
+        # Add abbreviation expansions
+        for word in words:
+            if word in ABBREV_MAP:
+                terms_to_check.extend(ABBREV_MAP[word])
+
+        def _present(term: str, text: str) -> bool:
+            """Word-boundary match, case-insensitive."""
+            escaped = re.escape(term)
+            return bool(re.search(r'(?<![a-z0-9])' + escaped + r'(?![a-z0-9])', text, re.IGNORECASE))
+
+        # At least ONE term must match
+        if not any(_present(term, title_text) for term in terms_to_check):
+            return False
+
+        # No NOT terms allowed
         for term in not_terms:
-            if _word_present(term, title_text):
+            if _present(term, title_text):
                 return False
+
         return True
 
     def _merge_jobs_unique(
@@ -1373,26 +1525,23 @@ class JobrightStrategy:
         return list(by_id.values())
 
     def find_jobs(self) -> list[dict]:
+        """
+        Collect jobs for all configured keywords.
+        Title filter is intentionally SKIPPED — we are already on the
+        keyword-specific search page so all results are relevant.
+        """
         if len(self._search_keywords) == 1:
             kw   = self._search_keywords[0]
             jobs = self.find_jobs_for_keyword(kw)
             for j in jobs:
                 j["source_keywords"] = [kw]
-            before = len(jobs)
-            jobs   = [j for j in jobs if self._matches_keyword_filter(j, kw)]
-            dropped = before - len(jobs)
-            if dropped:
-                print(f"🔍 Title filter dropped {dropped} jobs for keyword '{kw}'")
             return jobs
 
         keyword_job_lists = []
         for i, keyword in enumerate(self._search_keywords):
             jobs = self.find_jobs_for_keyword(keyword)
-            before = len(jobs)
-            jobs   = [j for j in jobs if self._matches_keyword_filter(j, keyword)]
-            dropped = before - len(jobs)
-            if dropped:
-                print(f"🔍 Title filter dropped {dropped} jobs for keyword '{keyword}'")
+            for j in jobs:
+                j["source_keywords"] = [keyword]
             keyword_job_lists.append((keyword, jobs))
             if i < len(self._search_keywords) - 1:
                 self._random_human_pause("next keyword")

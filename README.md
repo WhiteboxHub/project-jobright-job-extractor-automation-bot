@@ -1,21 +1,60 @@
-# Jobright Engine 🤖
+<div align="center">
 
-Automated job scraper for [Jobright.ai](https://jobright.ai).  
-Scrapes job listings and extracts real ATS apply URLs — all in **one browser session**.
+# Jobright Engine
+
+**Automated job discovery and ATS link extraction for [Jobright.ai](https://jobright.ai)**
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://python.org)
+[![Selenium](https://img.shields.io/badge/Selenium-4.10%2B-green?logo=selenium)](https://selenium.dev)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+
+</div>
 
 ---
 
-## How It Works
+## Overview
+
+Jobright Engine is a browser automation pipeline that:
+
+1. **Scrapes** job listings from Jobright.ai using configurable keywords and locations
+2. **Extracts** the real company ATS (Applicant Tracking System) apply URL from each job listing
+3. **Persists** all results to a structured JSON file, checkpointing after every job
+
+The entire pipeline runs in a **single Chrome session** — login happens once and is maintained throughout both steps, eliminating session-loss issues.
+
+---
+
+## Architecture
 
 ```
-Login once
-  │
-  ├── Step 1: Scroll job search pages → extract job cards → save to JSON
-  │
-  └── Step 2: Open each job page → click Apply → capture ATS URL → update JSON
+┌─────────────────────────────────────────────────────┐
+│                   run_pipeline.py                    │
+│                                                      │
+│  1. Build Chrome Driver                              │
+│  2. Login (once)                                     │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  STEP 1 — Job Discovery                      │   │
+│  │  jobright_strategy.py                        │   │
+│  │  • Search by keywords + location             │   │
+│  │  • Scroll & extract job cards                │   │
+│  │  • Merge with existing jobright_jobs.json    │   │
+│  └──────────────────────────────────────────────┘   │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  STEP 2 — ATS URL Enrichment                 │   │
+│  │  run_pipeline.py (inline)                    │   │
+│  │  • Navigate to each job page                 │   │
+│  │  • Layer 1: "Original Job Post" link         │   │
+│  │  • Layer 2: Apply button href                │   │
+│  │  • Layer 3: Click → dismiss modals → new tab │   │
+│  │  • Layer 4: Page source regex fallback       │   │
+│  │  • Auto re-login on session expiry           │   │
+│  └──────────────────────────────────────────────┘   │
+│                                                      │
+│  3. Save jobright_jobs.json  (per-job checkpoint)    │
+└─────────────────────────────────────────────────────┘
 ```
-
-Both steps share **one Chrome browser and one session** — no re-login needed between steps.
 
 ---
 
@@ -24,41 +63,58 @@ Both steps share **one Chrome browser and one session** — no re-login needed b
 ```
 jobright-engine/
 │
-├── run_pipeline.py              ← 🚀 Main entry point (Step 1 + Step 2)
+├── run_pipeline.py              # Entry point — runs full pipeline
 │
 ├── strategies/
 │   ├── __init__.py
 │   └── custom/
 │       ├── __init__.py
-│       └── jobright_strategy.py ← Core scraping logic (Step 1)
+│       └── jobright_strategy.py # Step 1: job discovery & scraping
 │
 ├── config/
-│   └── jobright.json            ← Credentials + search keywords
+│   └── jobright.json            # Search config (keywords, location, timing)
 │
-├── jobright_jobs.json           ← Output: scraped jobs with ATS URLs
-├── requirements.txt             ← Python dependencies
-├── setup_venv.ps1               ← One-time venv setup script
+├── .env                         # Credentials (never commit this)
 ├── .gitignore
+├── jobright_jobs.json           # Output — enriched job listings
+├── requirements.txt             # Python dependencies
+├── setup_venv.ps1               # One-time virtual environment setup
 └── README.md
 ```
 
 ---
 
+## Prerequisites
+
+- Python 3.10+
+- Google Chrome browser
+- A [Jobright.ai](https://jobright.ai) account
+
+---
+
 ## Setup
 
-### 1. Create virtual environment
+### Step 1 — Create the virtual environment
+
 ```powershell
 .\setup_venv.ps1
 ```
 
-### 2. Activate virtual environment
+### Step 2 — Activate it
+
 ```powershell
 .\venv\Scripts\Activate.ps1
 ```
 
-### 3. Configure credentials & keywords
+### Step 3 — Configure credentials
 
-Edit `config/jobright.json`:
+Edit `.env`:
+```env
+JOBRIGHT_EMAIL=your@email.com
+JOBRIGHT_PASSWORD=yourpassword
+```
+
+Edit `config/jobright.json` to set your search preferences:
 ```json
 {
   "credentials": {
@@ -72,9 +128,7 @@ Edit `config/jobright.json`:
   ],
   "location": "United States",
   "random_pause_min_sec": 3.0,
-  "random_pause_max_sec": 7.0,
-  "step2_pause_min_sec": 2.0,
-  "step2_pause_max_sec": 5.0
+  "random_pause_max_sec": 7.0
 }
 ```
 
@@ -82,63 +136,66 @@ Edit `config/jobright.json`:
 
 ## Usage
 
-### Full pipeline — scrape + extract ATS URLs
-```powershell
-python run_pipeline.py
-```
+### Full pipeline — scrape jobs then extract ATS URLs
 
-### Full pipeline with visible browser (recommended for first run)
 ```powershell
 python run_pipeline.py --visible
 ```
 
-### Step 1 only — scrape job listings
+### Step 1 only — scrape job listings, no enrichment
+
 ```powershell
-python run_pipeline.py --skip-step2
+python run_pipeline.py --skip-step2 --visible
 ```
 
-### Step 2 only — enrich existing `jobright_jobs.json`
+### Step 2 only — enrich an existing `jobright_jobs.json`
+
 ```powershell
-python run_pipeline.py --skip-step1
+python run_pipeline.py --skip-step1 --visible
 ```
 
-### Re-enrich all jobs (including already-enriched)
+### Re-enrich all jobs (override previously found ATS URLs)
+
 ```powershell
-python run_pipeline.py --skip-step1 --reprocess-all
+python run_pipeline.py --skip-step1 --reprocess-all --visible
 ```
 
-### Test mode — collect 10 jobs, enrich first 5
+### Quick test — scrape 10 jobs, enrich first 5
+
 ```powershell
 python run_pipeline.py --job-limit 10 --ats-limit 5 --visible
 ```
 
-### Single keyword + location override
+### Run fully headless (no browser window)
+
 ```powershell
-python run_pipeline.py --keyword "Data Scientist" --location "New York"
+python run_pipeline.py --headless
 ```
 
 ---
 
-## CLI Options
+## CLI Reference
 
 | Flag | Default | Description |
 |---|---|---|
-| `--visible` | off | Show browser window |
-| `--headless` | off | Force headless mode |
-| `--skip-step1` | off | Skip scraping, use existing JSON |
-| `--skip-step2` | off | Skip ATS enrichment |
-| `--job-limit N` | None | Max jobs to collect in Step 1 |
-| `--ats-limit N` | None | Max jobs to enrich in Step 2 |
-| `--reprocess-all` | off | Re-enrich jobs that already have `ats_url` |
+| `--visible` | `False` | Show the Chrome browser window |
+| `--headless` | `False` | Run Chrome without a window |
+| `--skip-step1` | `False` | Skip scraping, use existing JSON |
+| `--skip-step2` | `False` | Skip ATS enrichment |
+| `--job-limit N` | `None` | Collect at most N jobs in Step 1 |
+| `--ats-limit N` | `None` | Enrich at most N jobs in Step 2 |
+| `--reprocess-all` | `False` | Re-enrich even already-enriched jobs |
 | `--keyword TEXT` | from config | Override search keyword |
 | `--location TEXT` | from config | Override location |
 | `--output FILE` | `jobright_jobs.json` | Custom output file path |
 
+> **Note:** `--visible` takes priority over `--headless` if both are specified.
+
 ---
 
-## Output Format
+## Output
 
-`jobright_jobs.json` is updated after **every single job** (safe to interrupt with Ctrl+C):
+`jobright_jobs.json` is written after **every single job** processed, making it safe to interrupt and resume at any time.
 
 ```json
 {
@@ -149,18 +206,18 @@ python run_pipeline.py --keyword "Data Scientist" --location "New York"
   "jobs": [
     {
       "job_id": "69e6a2f8e0cd471b2f126e44",
-      "title": "React Python Developer",
-      "company": "Anagh Technologies Inc",
-      "location": "United States",
-      "city": null,
-      "state": null,
-      "job_type": "Contract",
+      "title": "Senior Python Developer",
+      "company": "Acme Corp",
+      "location": "New York, NY",
+      "city": "New York",
+      "state": "NY",
+      "job_type": "Full-time",
       "work_mode": "Remote",
       "seniority": "Senior Level",
-      "salary": null,
-      "posted_ago": "1 hour ago",
+      "salary": "$130K/yr - $160K/yr",
+      "posted_ago": "2 hours ago",
       "jobright_url": "https://jobright.ai/jobs/info/69e6a2f8...",
-      "ats_url": "https://boards.greenhouse.io/company/jobs/123456",
+      "ats_url": "https://boards.greenhouse.io/acmecorp/jobs/7890123",
       "ats_platform": "greenhouse",
       "source_keywords": ["Python Developer"],
       "scraped_at": "2026-04-22T05:19:47"
@@ -171,61 +228,62 @@ python run_pipeline.py --keyword "Data Scientist" --location "New York"
 
 ---
 
-## ATS Platforms Detected
+## Supported ATS Platforms
 
-| Platform | Pattern matched |
+| Platform | Domain Pattern |
 |---|---|
-| `greenhouse` | `boards.greenhouse.io`, `job-boards.greenhouse.io` |
-| `workday` | `myworkdayjobs.com`, `workday.com` |
-| `lever` | `jobs.lever.co` |
-| `icims` | `*.icims.com` |
-| `successfactors` | `*.successfactors.com`, `*.sapsf.com` |
-| `smartrecruiters` | `*.smartrecruiters.com` |
-| `ashby` | `*.ashbyhq.com` |
-| `bamboohr` | `*.bamboohr.com` |
-| `oraclecloud` | `*.oraclecloud.com` |
-| `linkedin` | `linkedin.com/jobs` |
-| `taleo` | `*.taleo.net` |
-| `jobvite` | `*.jobvite.com` |
-| `rippling` | `*.rippling.com` |
-| `eightfold` | `*.eightfold.ai` |
-| `paycom` | `*.paycom.com` |
-| `breezy` | `*.breezy.hr` |
-| `teamtailor` | `*.teamtailor.com` |
-| `recruitee` | `*.recruitee.com` |
-| `phenom` | `*.phenompeople.com` |
+| Greenhouse | `boards.greenhouse.io` |
+| Workday | `*.myworkdayjobs.com` |
+| Lever | `jobs.lever.co` |
+| iCIMS | `*.icims.com` |
+| SAP SuccessFactors | `*.successfactors.com` |
+| SmartRecruiters | `*.smartrecruiters.com` |
+| Ashby | `*.ashbyhq.com` |
+| BambooHR | `*.bamboohr.com` |
+| Oracle Cloud | `*.oraclecloud.com` |
+| Eightfold | `*.eightfold.ai` |
+| LinkedIn | `linkedin.com/jobs` |
+| Taleo | `*.taleo.net` |
+| Jobvite | `*.jobvite.com` |
+| Workable | `apply.workable.com` |
+| Rippling | `*.rippling.com` |
+| Paycom | `*.paycom.com` |
+| Breezy HR | `*.breezy.hr` |
+| Phenom People | `*.phenompeople.com` |
+| Teamtailor | `*.teamtailor.com` |
+| Recruitee | `*.recruitee.com` |
 
 ---
 
-## ATS URL Extraction — 4 Layers
+## Session Reliability
 
-| Layer | Method | Speed |
-|---|---|---|
-| **1** | `Original Job Post` link on the job detail page | ⚡ Fastest |
-| **2** | Direct `href` on the Apply `<a>` button | ⚡ Fast |
-| **3** | Click Apply → dismiss modals → capture new tab URL | 🐢 Slower |
-| **4** | Page source regex scan | 🐢 Fallback |
-
----
-
-## Session Management
-
-- Login happens **once** at startup
-- Before every job in Step 2, the session is **verified** automatically
-- If session expires mid-run, the engine **re-logs in** and retries the job
-- All progress is **checkpointed** — safe to interrupt and resume
+| Feature | Behavior |
+|---|---|
+| **Single login** | Logs in once at startup — session shared across all jobs |
+| **Session monitoring** | Checks login status before every job in Step 2 |
+| **Auto re-login** | Automatically re-authenticates if session expires mid-run |
+| **Modal handling** | Dismisses "Customize Resume", "Autofill", and Orion tour modals |
+| **Checkpoint saving** | Saves after every job — safe to Ctrl+C and resume |
 
 ---
 
-## Git Setup
+## Git
 
 ```powershell
-git init
+# Initial setup
 git config user.name "Your Name"
 git config user.email "your@email.com"
+
+# First commit
 git add .
 git commit -m "Initial commit"
+
+# Push to remote
+git remote add origin https://github.com/yourusername/jobright-engine.git
+git push -u origin main
 ```
+
+> ⚠️ The `.env` and `jobright_jobs.json` files are in `.gitignore` and will **not** be committed.
 
 ---
 
@@ -236,7 +294,12 @@ selenium>=4.10.0
 webdriver-manager>=4.0.0
 ```
 
-Install via:
 ```powershell
 pip install -r requirements.txt
 ```
+
+---
+
+## License
+
+MIT © 2026 Sairam

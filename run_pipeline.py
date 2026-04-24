@@ -127,33 +127,35 @@ def build_driver(headless=False):
 # ── Session management ─────────────────────────────────────────────────────────
 
 def is_logged_in(driver):
-    """True if the Jobright session is active."""
-    try:
-        btns = driver.find_elements(
-            By.XPATH,
-            "//*[normalize-space(text())='SIGN IN' or normalize-space(text())='JOIN NOW']"
-        )
-        if btns and any(b.is_displayed() for b in btns):
-            return False
-    except Exception:
-        pass
-    for xpath in [
-        "//span[normalize-space(text())='Resume']",
-        "//span[normalize-space(text())='Profile']",
-        "//*[contains(@class,'avatar')]",
-    ]:
-        try:
-            els = driver.find_elements(By.XPATH, xpath)
-            if els and any(e.is_displayed() for e in els):
-                return True
-        except Exception:
-            continue
+    """True if the Jobright session is active (checks cookies — no navigation)."""
+    # 1. Fast cookie check — no page load needed
     try:
         cookies = {c["name"] for c in driver.get_cookies()}
-        return any(kw in n.lower() for n in cookies
-                   for kw in ("token", "session", "auth", "jwt", "access"))
+        if any(kw in n.lower() for n in cookies
+               for kw in ("token", "session", "auth", "jwt", "access")):
+            return True
     except Exception:
-        return False
+        pass
+    # 2. DOM check on current page (if jobright.ai is already loaded)
+    try:
+        if "jobright.ai" in driver.current_url:
+            btns = driver.find_elements(
+                By.XPATH,
+                "//*[normalize-space(text())='SIGN IN' or normalize-space(text())='JOIN NOW']"
+            )
+            if btns and any(b.is_displayed() for b in btns):
+                return False
+            for xpath in [
+                "//span[normalize-space(text())='Resume']",
+                "//span[normalize-space(text())='Profile']",
+                "//*[contains(@class,'avatar')]",
+            ]:
+                els = driver.find_elements(By.XPATH, xpath)
+                if els and any(e.is_displayed() for e in els):
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def do_login(driver, email, password):
@@ -244,12 +246,57 @@ def do_login(driver, email, password):
         return False
 
 
-def ensure_session(driver, email, password):
-    """Re-login if session expired."""
+def ensure_session(driver, email, password, max_retries=3, headless=False):
+    """
+    Re-login if session expired.
+    If the driver itself is dead (ConnectionRefused), it attempts to restart the browser.
+    """
+    # 1. Check if driver is alive
+    is_alive = False
+    try:
+        _ = driver.current_url
+        is_alive = True
+    except Exception:
+        print("  ⚠️  Browser process appears dead (connection lost).")
+
+    # 2. If dead, we MUST restart the driver
+    if not is_alive:
+        print("  🔄 Restarting browser...")
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        # We need a way to call build_driver again.
+        # Since build_driver is global, we can just call it.
+        try:
+            new_driver = build_driver(headless=headless)
+            # Update the caller's driver reference (Note: this only works if they use the return value)
+            # But in Step 2 loop, we are passing the driver object.
+            # We'll return the (potentially new) driver.
+            if do_login(new_driver, email, password):
+                return new_driver
+            return None
+        except Exception as e:
+            print(f"  ❌ Failed to restart browser: {e}")
+            return None
+
+    # 3. If alive, check login status
     if is_logged_in(driver):
-        return True
+        return driver
+
     print("  ⚠️  Session expired — re-logging in...")
-    return do_login(driver, email, password)
+    for attempt in range(1, max_retries + 1):
+        if do_login(driver, email, password):
+            if is_logged_in(driver):
+                print(f"  ✅ Re-login successful (attempt {attempt})")
+                return driver
+            print(f"  ⚠️  Login submitted but session not confirmed (attempt {attempt})")
+            time.sleep(3)
+        else:
+            print(f"  ❌ Login attempt {attempt} failed")
+            time.sleep(2)
+    print("  ❌ Could not restore session after all retries")
+    return None
 
 
 # ── Step 2: ATS extraction helpers ────────────────────────────────────────────
@@ -519,15 +566,18 @@ def load_jobs(filepath):
 def main():
     ap = argparse.ArgumentParser(description="Jobright full pipeline — one browser, one session")
     ap.add_argument("--output",        default="jobright_jobs.json")
-    ap.add_argument("--headless",      action="store_true")
-    ap.add_argument("--skip-step1",    action="store_true", help="Skip scraping")
+    ap.add_argument("--visible",       action="store_true", help="Show browser window (default: headless)")
+    ap.add_argument("--headless",      action="store_true", help="Force headless mode")
+    ap.add_argument("--skip-step1",    action="store_true", help="Skip scraping, use existing JSON")
     ap.add_argument("--skip-step2",    action="store_true", help="Skip ATS enrichment")
-    ap.add_argument("--job-limit",     type=int, default=None, help="Max jobs to scrape")
-    ap.add_argument("--ats-limit",     type=int, default=None, help="Max jobs to enrich")
-    ap.add_argument("--reprocess-all", action="store_true",  help="Re-enrich all jobs")
-    ap.add_argument("--keyword",       type=str, default=None)
-    ap.add_argument("--location",      type=str, default=None)
+    ap.add_argument("--job-limit",     type=int, default=None, help="Max jobs to collect in Step 1")
+    ap.add_argument("--ats-limit",     type=int, default=None, help="Max jobs to enrich in Step 2")
+    ap.add_argument("--reprocess-all", action="store_true",  help="Re-enrich jobs that already have ats_url")
+    ap.add_argument("--keyword",       type=str, default=None, help="Override search keyword")
+    ap.add_argument("--location",      type=str, default=None, help="Override location")
     args = ap.parse_args()
+    # --visible takes priority over --headless
+    headless = args.headless and not args.visible
 
     output_file = args.output
     start_time  = datetime.now()
@@ -546,7 +596,7 @@ def main():
     print("=" * 62)
     print("  🚀 Jobright Pipeline — ONE browser, ONE session")
     print(f"  Output  : {output_file}")
-    print(f"  Headless: {args.headless}")
+    print(f"  Visible : {args.visible or not headless}")
     print(f"  Step 1  : {'SKIP' if args.skip_step1 else 'RUN'}")
     print(f"  Step 2  : {'SKIP' if args.skip_step2 else 'RUN'}")
     print("=" * 62)
@@ -554,7 +604,7 @@ def main():
     driver = None
     try:
         print("\n🚀 Starting Chrome...")
-        driver = build_driver(headless=args.headless)
+        driver = build_driver(headless=headless)
 
         # ── Login once ────────────────────────────────────────────────────
         if email and password:
@@ -573,7 +623,11 @@ def main():
             strategy = JobrightStrategy(driver=driver, config_override=config)
             strategy._is_logged_in = True  # already logged in above
 
-            new_jobs = strategy.find_jobs()
+            try:
+                new_jobs = strategy.find_jobs()
+            except Exception as e:
+                print(f"\n❌ Step 1 failed during find_jobs: {e}")
+                new_jobs = []
 
             if args.job_limit:
                 new_jobs = new_jobs[:args.job_limit]
@@ -601,7 +655,11 @@ def main():
             if args.reprocess_all:
                 pending_idx = list(range(len(jobs)))
             else:
-                pending_idx = [i for i, j in enumerate(jobs) if not j.get("ats_url")]
+                # Treat missing key AND explicit null both as pending
+                pending_idx = [
+                    i for i, j in enumerate(jobs)
+                    if "ats_url" not in j or j["ats_url"] is None
+                ]
 
             if args.ats_limit:
                 pending_idx = pending_idx[:args.ats_limit]
@@ -609,7 +667,9 @@ def main():
             already_done = len(jobs) - len(pending_idx) if not args.reprocess_all else 0
             print(f"  Pending: {len(pending_idx)}  |  Already done: {already_done}")
 
-            ok = fail = 0
+            ok = fail = consecutive_session_failures = 0
+            MAX_CONSECUTIVE_SESSION_FAILURES = 5  # abort if session keeps failing
+
             for n, idx in enumerate(pending_idx, 1):
                 job   = jobs[idx]
                 jid   = job.get("job_id", "")
@@ -619,14 +679,19 @@ def main():
 
                 print(f"\n  [{n}/{len(pending_idx)}] {title}")
 
-                # Verify session before every job
-                if email and not ensure_session(driver, email, password):
-                    print("    ❌ Cannot restore session — skipping")
-                    jobs[idx]["ats_url"]      = None
-                    jobs[idx]["ats_platform"] = None
+                # Verify session before every job (only checks cookies, no nav)
+                updated_driver = ensure_session(driver, email, password, headless=headless)
+                if not updated_driver:
+                    consecutive_session_failures += 1
+                    print(f"    ❌ Cannot restore session ({consecutive_session_failures}/{MAX_CONSECUTIVE_SESSION_FAILURES}) — skipping")
                     fail += 1
-                    save_jobs(output_file, jobs)
+                    if consecutive_session_failures >= MAX_CONSECUTIVE_SESSION_FAILURES:
+                        print(f"\n  🚫 Session unrecoverable after {MAX_CONSECUTIVE_SESSION_FAILURES} consecutive failures. Aborting Step 2.")
+                        break
                     continue
+                else:
+                    driver = updated_driver  # update local reference
+                    consecutive_session_failures = 0  # reset on success
 
                 result = get_ats_url(driver, jid, jurl, email, password)
 

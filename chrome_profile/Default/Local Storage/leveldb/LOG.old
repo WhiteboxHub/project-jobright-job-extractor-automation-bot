@@ -1,0 +1,6 @@
+2026/04/24-05:38:28.226 103c Reusing MANIFEST C:\Users\Innovapath\Desktop\job_engine\jobright-engine\chrome_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/04/24-05:38:28.231 103c Recovering log #10
+2026/04/24-05:38:28.234 103c Reusing old log C:\Users\Innovapath\Desktop\job_engine\jobright-engine\chrome_profile\Default\Local Storage\leveldb/000010.log 
+2026/04/24-05:52:30.257 6748 Level-0 table #14: started
+2026/04/24-05:52:30.263 6748 Level-0 table #14: 10517 bytes OK
+2026/04/24-05:52:30.272 6748 Delete type=0 #10

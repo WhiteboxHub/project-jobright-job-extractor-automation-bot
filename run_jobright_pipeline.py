@@ -11,6 +11,7 @@ Orchestrates the 4-step pipeline for Jobright.ai:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -64,8 +65,20 @@ def _run_step(label: str, script: Path, extra_args: list = []) -> bool:
         print(f"\n   ❌ {label} FAILED (exit {result.returncode}) after {duration}")
         return False
 
+def _load_jobs(path: Path) -> tuple[dict, list]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return {}, data
+        jobs = data.get("jobs", [])
+        meta = {k: v for k, v in data.items() if k != "jobs"}
+        return meta, jobs
+    except Exception:
+        return {}, []
+
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main():
+def run_pipeline(args_list=None) -> dict:
     parser = argparse.ArgumentParser(description="Jobright Pipeline Coordinator")
     parser.add_argument("--skip-step1", action="store_true", help="Skip fresh scrape, use existing JSON")
     parser.add_argument("--skip-step2", action="store_true", help="Skip ATS extraction")
@@ -73,19 +86,24 @@ def main():
     parser.add_argument("--skip-step4", action="store_true", help="Skip API ingestion")
     parser.add_argument("--limit", type=int, help="Limit jobs processed in Step 2")
     parser.add_argument("--no-email", action="store_true", help="Skip sending email report")
-    args = parser.parse_args()
+    parser.add_argument("--force", action="store_true", help="Force run (used by scheduler)")
+    args = parser.parse_args(args_list)
 
     total_start = time.time()
     _banner("JOBRIGHT PIPELINE START", "=")
+    
+    results = {}
 
     # ─────────────────────────────────────────────────────────
     # STEP 1: SCRAPE
     # ─────────────────────────────────────────────────────────
     if not args.skip_step1:
         if not _run_step("Step 1: Extract Job URLs", STEP1):
-            return 1
+            return {"status": "error", "error": "Step 1 failed", "jobs_saved": 0, "jobs_found": 0, "timestamp": _now()}
+        results["step1"] = "ok"
     else:
         print("⏭️  Skipping Step 1 (using existing jobs file)")
+        results["step1"] = "skipped"
 
     # ─────────────────────────────────────────────────────────
     # STEP 2: ENRICH (ATS URLS)
@@ -96,27 +114,36 @@ def main():
             step2_args += ["--limit", str(args.limit)]
         
         if not _run_step("Step 2: Extract ATS URLs", STEP2, step2_args):
-            return 1
+            results["step2"] = "failed"
+        else:
+            results["step2"] = "ok"
     else:
         print("⏭️  Skipping Step 2")
+        results["step2"] = "skipped"
 
     # ─────────────────────────────────────────────────────────
     # STEP 3: COMBINE (GROUP BY ATS)
     # ─────────────────────────────────────────────────────────
     if not args.skip_step3:
         if not _run_step("Step 3: Combine by ATS", STEP3):
-            return 1
+            results["step3"] = "failed"
+        else:
+            results["step3"] = "ok"
     else:
         print("⏭️  Skipping Step 3")
+        results["step3"] = "skipped"
 
     # ─────────────────────────────────────────────────────────
     # STEP 4: INGEST (API)
     # ─────────────────────────────────────────────────────────
     if not args.skip_step4:
         if not _run_step("Step 4: Ingest to API", STEP4):
-            return 1
+            results["step4"] = "failed"
+        else:
+            results["step4"] = "ok"
     else:
         print("⏭️  Skipping Step 4")
+        results["step4"] = "skipped"
 
     # ─────────────────────────────────────────────────────────
     # EMAIL REPORTING
@@ -132,7 +159,27 @@ def main():
     total_elapsed = time.time() - total_start
     m, s = int(total_elapsed // 60), int(total_elapsed % 60)
     _banner(f"JOBRIGHT PIPELINE COMPLETE (Total time: {m}m {s}s)", "=")
-    return 0
+    
+    # Calculate stats for the orchestrator
+    jobs_count, jobs_with_ats = 0, 0
+    if JOBS_FILE.exists():
+        _, all_jobs = _load_jobs(JOBS_FILE)
+        jobs_count = len(all_jobs)
+        jobs_with_ats = sum(1 for j in all_jobs if j.get("ats_url"))
+        
+    status = "success"
+    if results.get("step1") == "failed" or results.get("step3") == "failed":
+        status = "failed"
+        
+    return {
+        "status": status,
+        "jobs_saved": jobs_with_ats,
+        "jobs_found": jobs_count,
+        "timestamp": _now()
+    }
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    res = run_pipeline()
+    sys.exit(1 if res.get("status") in ["error", "failed"] else 0)

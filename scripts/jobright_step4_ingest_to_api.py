@@ -55,22 +55,31 @@ def _normalize_position_type(raw: str) -> str:
     else:
         return 'full_time'
 
+def _is_junk_company(name: str) -> bool:
+    """Filter out known junk company names."""
+    if not name: return True
+    junk = ['unknown', 'n/a', 'none', 'test', 'jobright', 'hiring cafe', 'linkedin']
+    return name.lower().strip() in junk
+
 def _build_job_listing(job: dict) -> dict:
     """Build a standard job object for the backend API."""
     title = (job.get('title') or "Unknown Title")[:255]
     company = _clean_company_name(job.get('company') or "Unknown Company")
     location = job.get('location') or ""
     
+    if _is_junk_company(company):
+        return None
+
     return {
-        "title": title.lower(),
-        "company_name": company.lower(),
-        "location": location.lower(),
-        "city": (job.get('city') or "").lower(),
-        "state": (job.get('state') or "").lower(),
-        "country": (job.get('country') or "united states").lower(),
+        "title": title.lower().strip(),
+        "company_name": company.lower().strip(),
+        "location": location.lower().strip(),
+        "city": (job.get('city') or "").lower().strip(),
+        "state": (job.get('state') or "").lower().strip(),
+        "country": (job.get('country') or "united states").lower().strip(),
         "position_type": _normalize_position_type(job.get('job_type')),
         "employment_mode": _normalize_employment_mode(job.get('work_mode')),
-        "source": "jobright.ai",
+        "source": "jobright",
         "source_uid": job.get('job_id'),
         "job_url": job.get('ats_url') or job.get('jobright_url'),
         "description": job.get('company_description') or job.get('description') or "",
@@ -108,7 +117,8 @@ def ingest_to_api(json_path: str):
         for job in jobs:
             try:
                 job_listing = _build_job_listing(job)
-                batch_data.append(job_listing)
+                if job_listing:
+                    batch_data.append(job_listing)
                 
                 # Send in batches of 50
                 if len(batch_data) >= 50:

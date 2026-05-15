@@ -70,7 +70,7 @@ def _build_job_listing(job: dict) -> dict:
         "country": (job.get('country') or "united states").lower(),
         "position_type": _normalize_position_type(job.get('job_type')),
         "employment_mode": _normalize_employment_mode(job.get('work_mode')),
-        "source": "jobright.ai",
+        "source": "jobright",
         "source_uid": job.get('job_id'),
         "job_url": job.get('ats_url') or job.get('jobright_url'),
         "description": job.get('company_description') or job.get('description') or "",
@@ -106,6 +106,10 @@ def ingest_to_api(json_path: str):
         logger.info(f"Processing {len(jobs)} jobs for platform: {platform}")
         
         for job in jobs:
+            # ONLY ingest if we have a valid ATS URL
+            if not job.get('ats_url'):
+                continue
+                
             try:
                 job_listing = _build_job_listing(job)
                 batch_data.append(job_listing)
@@ -135,7 +139,13 @@ def _send_batch(client, batch):
         res_data = response.json()
         logger.info(f"Batch success: {res_data.get('inserted', 0)} inserted, {res_data.get('skipped', 0)} duplicates")
     except Exception as e:
-        logger.error(f"Failed to send batch to API: {e}")
+        error_msg = str(e)
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_msg += f" - Response: {e.response.text}"
+            except:
+                pass
+        logger.error(f"Failed to send batch to API: {error_msg}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingest job data into the backend API.")

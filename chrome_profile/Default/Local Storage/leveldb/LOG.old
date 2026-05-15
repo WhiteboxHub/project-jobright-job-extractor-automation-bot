@@ -1,3 +1,6 @@
-2026/05/15-20:44:48.699 59ac Reusing MANIFEST C:\Users\Innovapath\Desktop\job_engine\jobright-job-extractor\chrome_profile\Default\Local Storage\leveldb/MANIFEST-000001
-2026/05/15-20:44:48.704 59ac Recovering log #9
-2026/05/15-20:44:48.706 59ac Reusing old log C:\Users\Innovapath\Desktop\job_engine\jobright-job-extractor\chrome_profile\Default\Local Storage\leveldb/000009.log 
+2026/05/15-21:25:28.402 31b8 Reusing MANIFEST C:\Users\Innovapath\Desktop\job_engine\jobright-job-extractor\chrome_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/05/15-21:25:28.407 31b8 Recovering log #9
+2026/05/15-21:25:28.409 31b8 Reusing old log C:\Users\Innovapath\Desktop\job_engine\jobright-job-extractor\chrome_profile\Default\Local Storage\leveldb/000009.log 
+2026/05/15-21:25:38.191 31b8 Level-0 table #13: started
+2026/05/15-21:25:38.198 31b8 Level-0 table #13: 11530 bytes OK
+2026/05/15-21:25:38.206 31b8 Delete type=0 #9

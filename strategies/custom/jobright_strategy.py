@@ -39,11 +39,17 @@ JOB_LINK_SELECTOR = 'a[href*="/jobs/info/"]'
 
 # Apply button on job detail page (opens ATS in new tab)
 APPLY_NOW_BUTTON_XPATH = """
-//button[@id='apply-now-button-id']
+//div[contains(@class, 'index_jobDetail')]//button[contains(@class, 'index_apply-button')]
+| //div[contains(@class, 'index_jobDetail')]//button[contains(., 'Apply')]
+| //div[contains(@id, 'apply-now')]//button
+| //button[contains(@class, 'index_apply-button')]
+| //button[@id='apply-now-button-id']
+| //a[contains(@class, 'index_apply-button')]
 | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply now')]
 | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply on employer')]
 | //button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]
 | //a[@class and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]
+| //*[contains(@class, 'applyButton')]
 """
 
 APPLY_BUTTON_FALLBACK_XPATHS = [
@@ -200,7 +206,9 @@ def is_likely_ats_url(url: str) -> bool:
     url_stripped = url.strip()
     url_lower = url_stripped.lower()
 
-    if "jobright.ai" in url_lower:
+    # Only reject if we are still on the jobright.ai domain (ignoring query params)
+    parsed_check = urlparse(url_lower)
+    if "jobright.ai" in parsed_check.netloc:
         return False
 
     for domain in NON_ATS_URL_DOMAINS:
@@ -1175,6 +1183,249 @@ class JobrightStrategy:
             print(f"[DEBUG] DOM ATS extraction failed: {e}")
             return None
 
+    def _handle_login_modal(self) -> bool:
+        """
+        Handle the 'Sign in to continue' modal that often appears after clicking Apply.
+        Uses credentials from self._credentials.
+        """
+        try:
+            # Check for common login modal indicators
+            login_indicators = [
+                "//h2[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]",
+                "//h1[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]",
+                "//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]",
+                "//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in')]",
+                "//input[@type='email']",
+                "//button[contains(., 'Continue with Email')]",
+                "//button[contains(., 'Sign in with Email')]",
+                "//*[contains(text(), 'Create an account')]",
+                "//*[contains(text(), 'Join Jobright')]",
+                "//*[contains(text(), 'Sign Up to Apply')]"
+            ]
+            
+            is_modal_present = False
+            found_xpath = ""
+            for xpath in login_indicators:
+                if self.driver.find_elements(By.XPATH, xpath):
+                    is_modal_present = True
+                    found_xpath = xpath
+                    break
+            
+            if not is_modal_present:
+                return False
+                
+            print(f"[INFO] Login/Signup modal detected post-click (via {found_xpath[:40]}...). Attempting to solve...")
+            
+            # Step 0: If we are on a Sign Up page instead of Login, switch to Login
+            try:
+                signup_indicators = [
+                    "//h2[contains(., 'Sign Up')]", 
+                    "//h1[contains(., 'Sign Up')]",
+                    "//div[contains(text(), 'Sign Up to Apply')]",
+                    "//button[contains(., 'Sign up') and not(contains(., 'Email'))]"
+                ]
+                if any(self.driver.find_elements(By.XPATH, x) for x in signup_indicators):
+                    login_link = self.driver.find_elements(By.XPATH, """
+                        //a[contains(., 'Log in')] 
+                        | //button[contains(., 'Log in')] 
+                        | //*[contains(text(), 'Already have an account?')]
+                        | //*[contains(text(), 'Sign in now')]
+                        | //span[contains(text(), 'Sign in now')]
+                    """)
+                    if login_link:
+                        print("  [LOGIN] On Signup page, switching to Login...")
+                        self.driver.execute_script("arguments[0].click();", login_link[0])
+                        time.sleep(2)
+            except Exception:
+                pass
+
+            # Step 1: Click "Continue with Email" if present
+            try:
+                cont_btn_xpaths = [
+                    "//button[contains(., 'Continue with Email')]",
+                    "//button[contains(., 'Sign in with Email')]",
+                    "//div[contains(text(), 'Continue with Email')]",
+                    "//span[contains(text(), 'Continue with Email')]"
+                ]
+                for xpath in cont_btn_xpaths:
+                    btns = self.driver.find_elements(By.XPATH, xpath)
+                    if btns and btns[0].is_displayed():
+                        print(f"  [LOGIN] Clicking '{btns[0].text}'...")
+                        self.driver.execute_script("arguments[0].click();", btns[0])
+                        time.sleep(2)
+                        break
+            except Exception as e:
+                print(f"  [DEBUG] Error clicking Continue with Email: {e}")
+
+            # Step 2: Fill Email
+            email = self._credentials.get("email")
+            password = self._credentials.get("password")
+            
+            if not email or not password:
+                print("[WARN] No credentials available to solve login modal.")
+                return False
+
+            email_field = None
+            for email_xpath in [
+                "//input[@type='email']",
+                "//input[contains(@placeholder,'mail')]",
+                "//input[contains(@name,'email')]",
+                "//input[contains(@id,'email')]"
+            ]:
+                try:
+                    fields = self.driver.find_elements(By.XPATH, email_xpath)
+                    if fields and fields[0].is_displayed():
+                        email_field = fields[0]
+                        break
+                except Exception:
+                    continue
+
+            if email_field:
+                print(f"  [LOGIN] Filling email: {email}")
+                email_field.clear()
+                email_field.send_keys(email)
+                time.sleep(1)
+                # Click Continue/Next if there's a multi-step login
+                try:
+                    next_btn_xpaths = [
+                        "//button[contains(., 'Continue')]",
+                        "//button[contains(., 'Next')]",
+                        "//button[@type='submit']"
+                    ]
+                    for xpath in next_btn_xpaths:
+                        btns = self.driver.find_elements(By.XPATH, xpath)
+                        if btns and btns[0].is_displayed():
+                            print(f"  [LOGIN] Clicking '{btns[0].text}'...")
+                            self.driver.execute_script("arguments[0].click();", btns[0])
+                            time.sleep(2)
+                            break
+                except Exception:
+                    pass
+
+            # Step 3: Fill Password
+            pw_field = None
+            for pw_xpath in [
+                "//input[@type='password']",
+                "//input[contains(@placeholder,'assword')]",
+                "//input[contains(@name,'password')]"
+            ]:
+                try:
+                    fields = self.driver.find_elements(By.XPATH, pw_xpath)
+                    if fields and fields[0].is_displayed():
+                        pw_field = fields[0]
+                        break
+                except Exception:
+                    continue
+
+            if pw_field:
+                print("  [LOGIN] Filling password...")
+                pw_field.clear()
+                pw_field.send_keys(password)
+                time.sleep(1)
+                
+            # Step 4: Submit
+            submit_xpath = """
+                //button[@type='submit'] 
+                | //button[contains(., 'Sign In')] 
+                | //button[contains(., 'Log In')]
+                | //button[contains(., 'Continue')]
+            """
+            try:
+                btns = self.driver.find_elements(By.XPATH, submit_xpath)
+                if btns:
+                    # Find the first visible one
+                    target_btn = next((b for b in btns if b.is_displayed()), None)
+                    if target_btn:
+                        print(f"  [LOGIN] Clicking submit: '{target_btn.text}'...")
+                        self.driver.execute_script("arguments[0].click();", target_btn)
+                        time.sleep(5)
+                        return True
+                
+                if pw_field:
+                    print("  [LOGIN] Pressing Enter on password field...")
+                    pw_field.send_keys("\n")
+                    time.sleep(5)
+                    return True
+            except Exception as e:
+                print(f"  [DEBUG] Error during login submit: {e}")
+                
+        except Exception as e:
+            print(f"[WARN] Error handling login modal: {e}")
+            return False
+        return False
+
+    def _dismiss_jobright_modals(self) -> bool:
+        """
+        Dismiss various Jobright modals that appear after clicking Apply.
+        Returns True if any modal was dismissed.
+        """
+        dismissed_any = False
+        try:
+            # 1. Resume Customization Modal
+            no_customize_xpath = """
+                //button[contains(@class, 'index_cancelButton')]
+                | //button[.//p[contains(text(), 'Apply without Customizing')]]
+                | //button[contains(., 'Apply without Customizing')]
+                | //span[contains(text(), 'Apply without Customizing')]/..
+            """
+            btns = self.driver.find_elements(By.XPATH, no_customize_xpath)
+            if btns and btns[0].is_displayed():
+                print("[INFO] Dismissing 'Resume Customization' modal...")
+                # Also try to check "Do not remind me again"
+                try:
+                    chk = self.driver.find_elements(By.XPATH, "//span[contains(text(), 'Do not remind me again')]/preceding-sibling::input")
+                    if chk: self.driver.execute_script("arguments[0].click();", chk[0])
+                except Exception: pass
+                self.driver.execute_script("arguments[0].click();", btns[0])
+                dismissed_any = True
+                time.sleep(1.5)
+
+            # 2. Autofill Modal
+            autofill_manual_xpath = """
+                //button[contains(., 'Apply Manually')]
+                | //span[contains(text(), 'No, Apply Manually')]/..
+            """
+            btns = self.driver.find_elements(By.XPATH, autofill_manual_xpath)
+            if btns and btns[0].is_displayed():
+                print("[INFO] Dismissing 'Autofill' promo modal...")
+                self.driver.execute_script("arguments[0].click();", btns[0])
+                dismissed_any = True
+                time.sleep(1.5)
+
+            # 3. Post-Apply Confirmation Modal ("Did you apply?")
+            did_apply_xpath = """
+                //span[contains(text(), "No, I didn't apply")]/..
+                | //button[contains(., "I didn't apply")]
+            """
+            btns = self.driver.find_elements(By.XPATH, did_apply_xpath)
+            if btns and btns[0].is_displayed():
+                print("[INFO] Dismissing 'Post-Apply Confirmation' modal...")
+                self.driver.execute_script("arguments[0].click();", btns[0])
+                dismissed_any = True
+                time.sleep(1.5)
+                
+            # 4. Orion "Boost Your Resume" Modal (as shown in your screenshot)
+            orion_exit_xpath = """
+                //button[contains(., 'EXIT')]
+                | //button[contains(., 'Exit')]
+                | //div[contains(., 'Boost Your Resume')]//button
+            """
+            btns = self.driver.find_elements(By.XPATH, orion_exit_xpath)
+            if btns and btns[0].is_displayed():
+                print("[INFO] Dismissing 'Orion / Boost Your Resume' modal...")
+                self.driver.execute_script("arguments[0].click();", btns[0])
+                dismissed_any = True
+                time.sleep(1.5)
+
+            # 5. Login/Signup Modal (Generic Handler)
+            if self._handle_login_modal():
+                dismissed_any = True
+
+        except Exception as e:
+            print(f"[DEBUG] Error dismissing modals: {e}")
+            
+        return dismissed_any
+
     def _get_ats_link_from_job_page(self, job_id: str) -> dict | None:
         """
         Full 6-layer ATS extraction for one job.
@@ -1199,6 +1450,17 @@ class JobrightStrategy:
 
             main_handle = self.driver.current_window_handle
 
+            # ── Layer 0: Check if job is closed ──────────────────────────────
+            is_closed = False
+            try:
+                closed_text = ["This job has closed", "Job closed", "No longer accepting"]
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text
+                if any(ct in page_text for ct in closed_text):
+                    print(f"[INFO] Job {job_id} is CLOSED. Skipping Apply button, checking fallbacks.")
+                    is_closed = True
+            except Exception:
+                pass
+
             # ── Layers 1+2: DOM + page source ────────────────────────────────
             ats_url = self._try_get_ats_url_from_dom()
             if ats_url and is_likely_ats_url(ats_url):
@@ -1207,7 +1469,9 @@ class JobrightStrategy:
                 return {"ats_url": ats_url, "ats_platform": platform}
 
             # ── Layer 3: Click Apply button → new tab ─────────────────────────
-            btn = self._find_apply_button()
+            btn = None
+            if not is_closed:
+                btn = self._find_apply_button()
 
             if btn:
                 try:
@@ -1230,25 +1494,16 @@ class JobrightStrategy:
                         print(f"[WARN] Click failed for {job_id}: {e}")
 
                 if clicked:
-                    # Jobright specific: handle "Customize Your Resume" modal
-                    try:
-                        # Check for "Apply without Customizing" button
-                        no_customize_xpath = """
-                            //button[contains(@class, 'index_cancelButton')]
-                            | //button[.//p[contains(text(), 'Apply without Customizing')]]
-                            | //button[contains(., 'Apply without Customizing')]
-                        """
-                        no_customize = WebDriverWait(self.driver, 3).until(
-                            EC.element_to_be_clickable((By.XPATH, no_customize_xpath))
-                        )
-                        print("[INFO] Clicking 'Apply without Customizing' modal button...")
-                        no_customize.click()
-                    except Exception:
-                        pass
+                    # ── NEW: Handle Jobright modals in a loop ─────────────────
+                    # Many jobs trigger multiple modals (Resume -> Autofill -> Confirm)
+                    for attempt in range(3):
+                        if not self._dismiss_jobright_modals():
+                            break
+                        time.sleep(1)
 
-                    # Wait up to 5s for new tab
+                    # Wait up to 12s for new tab
                     new_handles = []
-                    for _ in range(5):
+                    for _ in range(12):
                         time.sleep(1)
                         handles = self.driver.window_handles
                         new_handles = [h for h in handles if h != main_handle]
@@ -1259,59 +1514,66 @@ class JobrightStrategy:
                         # ── Layer 3a: New tab ─────────────────────────────────
                         try:
                             self.driver.switch_to.window(new_handles[0])
-                            time.sleep(2)
-                            try:
+                            # Wait for final URL (handles redirects like Workday)
+                            for _ in range(12):
+                                time.sleep(1)
                                 ats_url = self.driver.current_url
-                            except Exception:
-                                ats_url = None
-                                try:
-                                    self.driver.switch_to.window(main_handle)
-                                except Exception:
-                                    pass
-
-                            if new_handles[0] in self.driver.window_handles:
-                                try:
-                                    self.driver.close()
-                                except Exception:
-                                    pass
-
-                            try:
-                                self.driver.switch_to.window(main_handle)
-                            except Exception:
-                                pass
-
-                        except Exception as tab_err:
-                            print(f"[DEBUG] Tab error: {tab_err}")
-                            ats_url = None
-                            try:
-                                self.driver.switch_to.window(self.driver.window_handles[0])
-                            except Exception:
-                                pass
-
-                        if ats_url and is_likely_ats_url(ats_url):
+                                if is_likely_ats_url(ats_url):
+                                    break
+                            
                             platform = detect_ats_platform(ats_url) or "unknown"
                             print(f"[NewTab] {job_url} -> {ats_url}")
+                            
+                            # Close and return
+                            if len(self.driver.window_handles) > 1:
+                                self.driver.close()
+                            self.driver.switch_to.window(main_handle)
+                            
+                            # Dismiss 'Did you apply?' modal on original tab
+                            time.sleep(1)
+                            self._dismiss_jobright_modals()
+                            
                             return {"ats_url": ats_url, "ats_platform": platform}
+                        except Exception as tab_err:
+                            print(f"[DEBUG] Tab interaction failed: {tab_err}")
+                            try: self.driver.switch_to.window(main_handle)
+                            except: pass
 
-                    else:
-                        # ── Layer 4: Same-tab redirect ────────────────────────
+                    # ── Layer 4: Same-tab redirect ────────────────────────
+                    # Wait longer (up to 10s) for same-tab redirect
+                    for _ in range(10):
                         time.sleep(1)
                         current = self.driver.current_url
+                        
+                        # IF we are on a login page, try to login
+                        if "login" in current.lower() or "signin" in current.lower():
+                            if self._handle_login_modal():
+                                time.sleep(5)
+                                current = self.driver.current_url
+
                         if "jobright.ai" not in current.lower() and is_likely_ats_url(current):
                             platform = detect_ats_platform(current) or "unknown"
                             print(f"[SameTab] {job_url} -> {current}")
                             return {"ats_url": current, "ats_platform": platform}
 
-                        # ── Layer 5: Page source after click ──────────────────
-                        time.sleep(2)
-                        candidates = self._extract_ats_urls_from_page_source()
-                        if candidates:
-                            ats_url = candidates[0]
-                            platform = detect_ats_platform(ats_url) or "unknown"
-                            print(f"[PostClick/Regex] {job_url} -> {ats_url}")
-                            return {"ats_url": ats_url, "ats_platform": platform}
+                    # ── Layer 5: Page source after click ──────────────────
+                    candidates = self._extract_ats_urls_from_page_source()
+                    if candidates:
+                        ats_url = candidates[0]
+                        platform = detect_ats_platform(ats_url) or "unknown"
+                        print(f"[PostClick/Regex] {job_url} -> {ats_url}")
+                        return {"ats_url": ats_url, "ats_platform": platform}
             else:
-                print(f"[WARN] Apply button not found for {job_id}")
+                # ── Layer 6: Fallback to 'Original Job Post' if Apply missing ──
+                origin_links = self.driver.find_elements(By.XPATH, ORIGINAL_JOB_POST_LINK_XPATH)
+                if origin_links:
+                    ats_url = origin_links[0].get_attribute("href")
+                    if ats_url and "jobright.ai" not in ats_url.lower():
+                        platform = detect_ats_platform(ats_url) or "unknown"
+                        print(f"[Fallback/Origin] {job_url} -> {ats_url}")
+                        return {"ats_url": ats_url, "ats_platform": platform}
+                
+                print(f"[WARN] No Apply button or Origin link found for {job_id}")
 
             print(f"[Failed] {job_url} -> ats_url: null")
             return None

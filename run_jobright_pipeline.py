@@ -87,7 +87,15 @@ def run_pipeline(args_list=None) -> dict:
     parser.add_argument("--limit", type=int, help="Limit jobs processed in Step 2")
     parser.add_argument("--no-email", action="store_true", help="Skip sending email report")
     parser.add_argument("--force", action="store_true", help="Force run (used by scheduler)")
+    parser.add_argument("--visible", action="store_true", help="Show browser window")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    parser.add_argument("--reprocess-all", action="store_true", help="Force re-extraction of all jobs in Step 2")
     args = parser.parse_args(args_list)
+
+    if args.visible:
+        os.environ["HEADLESS"] = "false"
+    elif args.headless:
+        os.environ["HEADLESS"] = "true"
 
     total_start = time.time()
     _banner("JOBRIGHT PIPELINE START", "=")
@@ -112,6 +120,12 @@ def run_pipeline(args_list=None) -> dict:
         step2_args = []
         if args.limit:
             step2_args += ["--limit", str(args.limit)]
+        if args.visible:
+            step2_args.append("--visible")
+        elif args.headless:
+            step2_args.append("--headless")
+        if args.reprocess_all:
+            step2_args.append("--reprocess-all")
         
         if not _run_step("Step 2: Extract ATS URLs", STEP2, step2_args):
             results["step2"] = "failed"

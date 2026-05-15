@@ -15,13 +15,22 @@ sys.path.append(str(ROOT))
 from core.logger import logger
 from core.browser import browser_service
 from strategies.custom.jobright_strategy import JobrightStrategy, _load_jobright_config
+from config.settings import settings
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input",  default=str(ROOT / "jobright_jobs.json"))
     parser.add_argument("--output", default=str(ROOT / "jobright_jobs.json"))
     parser.add_argument("--limit",  type=int, default=None)
+    parser.add_argument("--reprocess-all", action="store_true", help="Clear existing ATS URLs and re-process")
+    parser.add_argument("--visible", action="store_true", help="Show browser window")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
     args = parser.parse_args()
+
+    if args.visible:
+        settings.HEADLESS = False
+    elif args.headless:
+        settings.HEADLESS = True
 
     logger.info("Starting Jobright Step 2: Extract ATS URLs")
 
@@ -41,6 +50,12 @@ def main():
     if not jobs:
         logger.warning("No jobs to process in Step 2.")
         return
+
+    if getattr(args, "reprocess_all", False):
+        logger.info("Reprocess-all flag set: Clearing existing ATS data from jobs list.")
+        for j in jobs:
+            if "ats_url" in j: del j["ats_url"]
+            if "ats_platform" in j: del j["ats_platform"]
 
     # Load config to get credentials
     config = _load_jobright_config()

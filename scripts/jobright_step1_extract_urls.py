@@ -32,7 +32,10 @@ def main():
         strategy = JobrightStrategy(driver)
         
         # Login if credentials available
-        strategy.login()
+        logged_in = strategy.login()
+        if not logged_in and strategy._credentials.get("email"):
+            logger.error("❌ Step 1 failed: Login unsuccessful. Aborting to avoid bot detection.")
+            return
         
         # Phase 1: Scroll and collect job listings
         logger.info("Phase 1: Collecting unique jobs across all keywords...")

@@ -1,9 +1,25 @@
+# Virtual Environments
 venv/
 venvv/
+.venv/
+
+# Python Cache
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Browser Data (Crucial to ignore)
+chrome_profile/
+chrome_profile_step1/
 *.tmp
 *.log
-.env
+
+# Project Data & Artifacts
 jobright_jobs.json
+jobright_by_ats.json
+data/*.duckdb
+
+# Environment & Sensitive Data
+.env
+.python-version

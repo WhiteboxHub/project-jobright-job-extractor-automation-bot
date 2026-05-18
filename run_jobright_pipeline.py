@@ -13,6 +13,7 @@ Orchestrates the 4-step pipeline for Jobright.ai:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -87,7 +88,39 @@ def run_pipeline(args_list=None) -> dict:
     parser.add_argument("--limit", type=int, help="Limit jobs processed in Step 2")
     parser.add_argument("--no-email", action="store_true", help="Skip sending email report")
     parser.add_argument("--force", action="store_true", help="Force run (used by scheduler)")
+    parser.add_argument("--run-name", type=str, help="Optional name for this run")
+    parser.add_argument("--visible", action="store_true", help="Show browser window")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    parser.add_argument("--reprocess-all", action="store_true", help="Force re-extraction in Step 2")
     args = parser.parse_args(args_list)
+
+    if args.visible:
+        os.environ["HEADLESS"] = "false"
+    elif args.headless:
+        os.environ["HEADLESS"] = "true"
+
+    # ── PRE-FLIGHT ──────────────────────────────────────────
+    print(f"\n   🧹 Pre-flight: cleaning Chrome environment...")
+    _banner("CLEANING CHROME", "-")
+    if sys.platform == "win32":
+        for proc in ("chrome.exe", "chromedriver.exe"):
+            subprocess.run(["taskkill", "/F", "/IM", proc], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    # Clear profile locks
+    profile_dir = ROOT / "chrome_profile"
+    for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+        lock_path = profile_dir / lock
+        if lock_path.exists():
+            try: lock_path.unlink()
+            except: pass
+    
+    # Nuke Default to reset session if needed
+    default_dir = profile_dir / "Default"
+    if default_dir.exists():
+        try: shutil.rmtree(default_dir)
+        except: pass
+    
+    print(f"   ✅ Pre-flight complete")
 
     total_start = time.time()
     _banner("JOBRIGHT PIPELINE START", "=")
@@ -98,7 +131,11 @@ def run_pipeline(args_list=None) -> dict:
     # STEP 1: SCRAPE
     # ─────────────────────────────────────────────────────────
     if not args.skip_step1:
-        if not _run_step("Step 1: Extract Job URLs", STEP1):
+        step1_args = []
+        if args.visible: step1_args.append("--visible")
+        elif args.headless: step1_args.append("--headless")
+        
+        if not _run_step("Step 1: Extract Job URLs", STEP1, step1_args):
             return {"status": "error", "error": "Step 1 failed", "jobs_saved": 0, "jobs_found": 0, "timestamp": _now()}
         results["step1"] = "ok"
     else:
@@ -112,6 +149,12 @@ def run_pipeline(args_list=None) -> dict:
         step2_args = []
         if args.limit:
             step2_args += ["--limit", str(args.limit)]
+        if args.visible:
+            step2_args.append("--visible")
+        elif args.headless:
+            step2_args.append("--headless")
+        if args.reprocess_all:
+            step2_args.append("--reprocess-all")
         
         if not _run_step("Step 2: Extract ATS URLs", STEP2, step2_args):
             results["step2"] = "failed"

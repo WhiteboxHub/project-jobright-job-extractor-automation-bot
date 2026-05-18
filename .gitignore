@@ -7,3 +7,6 @@ __pycache__/
 *.log
 .env
 jobright_jobs.json
+jobright_by_ats.json
+chrome_profile/
+logs/

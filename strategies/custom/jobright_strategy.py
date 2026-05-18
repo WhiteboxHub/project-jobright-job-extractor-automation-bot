@@ -365,15 +365,16 @@ class JobrightStrategy:
             self.driver.get(self.base_url)
             time.sleep(3)
             
-            is_logged_in = False
-            for av_xpath in [
-                "//*[contains(@class,'avatar')]",
-                "//button[contains(@aria-label,'account')]",
-                "//img[contains(@alt,'avatar')]",
-                "//*[contains(@class,'Sidebar_sidebar')]//div[contains(@class,'index_user')]",
+            is_logged_in = True
+            for not_logged_in_xpath in [
+                "//*[normalize-space(text())='SIGN IN']",
+                "//*[normalize-space(text())='Sign In']",
+                "//*[normalize-space(text())='JOIN NOW']",
+                "//a[contains(@href,'/login')]",
             ]:
-                if self.driver.find_elements(By.XPATH, av_xpath):
-                    is_logged_in = True
+                elements = self.driver.find_elements(By.XPATH, not_logged_in_xpath)
+                if elements and any(e.is_displayed() for e in elements):
+                    is_logged_in = False
                     break
             
             if is_logged_in:
@@ -381,31 +382,27 @@ class JobrightStrategy:
                 self._is_logged_in = True
                 return True
 
-            # ── Strategy 1: navigate directly to the login page ───────────────
-            self.driver.get(f"{self.base_url}/login")
+            # ── Open Sign In Modal ────────────────────────────────────────────
+            logger.info("[LOGIN] Triggering homepage SIGN IN modal...")
+            self.driver.get(self.base_url)
             time.sleep(3)
 
-            # If redirected (already logged in / no /login route) try homepage modal
-            if "/login" not in self.driver.current_url.lower():
-                logger.info("[LOGIN] /login redirected — trying homepage SIGN IN modal...")
-                self.driver.get(self.base_url)
-                time.sleep(2)
-                # Look for any SIGN IN / Log In link
-                for xpath in [
-                    "//*[normalize-space(text())='SIGN IN']",
-                    "//*[normalize-space(text())='Sign In']",
-                    "//*[normalize-space(text())='Log In']",
-                    "//a[contains(@href,'/login')]",
-                ]:
-                    try:
-                        btn = WebDriverWait(self.driver, 4).until(
-                            EC.element_to_be_clickable((By.XPATH, xpath))
-                        )
-                        btn.click()
-                        time.sleep(2)
-                        break
-                    except Exception:
-                        continue
+            # Look for the top-right SIGN IN button
+            for xpath in [
+                "//span[normalize-space(text())='SIGN IN']",
+                "//button[normalize-space(text())='SIGN IN']",
+                "//*[normalize-space(text())='SIGN IN']",
+                "//*[normalize-space(text())='Sign In']",
+            ]:
+                try:
+                    btn = WebDriverWait(self.driver, 4).until(
+                        EC.element_to_be_clickable((By.XPATH, xpath))
+                    )
+                    btn.click()
+                    time.sleep(2)
+                    break
+                except Exception:
+                    continue
 
             # ── Fill email ────────────────────────────────────────────────────
             email_field = None
@@ -456,10 +453,10 @@ class JobrightStrategy:
             submitted = False
             for sub_xpath in [
                 "//button[@type='submit']",
-                "//button[.//span[normalize-space(text())='SIGN IN']]",
-                "//button[normalize-space(text())='SIGN IN']",
-                "//button[normalize-space(text())='Sign In']",
-                "//button[normalize-space(text())='Log In']",
+                "//div[@role='dialog']//button[contains(normalize-space(text()), 'SIGN IN')]",
+                "//div[@role='dialog']//button[.//span[normalize-space(text())='SIGN IN']]",
+                "(//button[contains(normalize-space(text()), 'SIGN IN')])[last()]",
+                "//button[contains(normalize-space(text()), 'Sign In')]",
             ]:
                 try:
                     sub_btn = WebDriverWait(self.driver, 4).until(
@@ -1048,8 +1045,36 @@ class JobrightStrategy:
         except Exception:
             pass
 
+        # JS-based text search for "APPLY WITH AUTOFILL" or "APPLY NOW" (active jobs on Jobright)
         try:
-            btn = WebDriverWait(self.driver, 10).until(
+            btn = self.driver.execute_script("""
+                var els = document.querySelectorAll('*');
+                for (var i = 0; i < els.length; i++) {
+                    var text = els[i].textContent.toUpperCase().trim();
+                    // We only want leaf-ish nodes, not the whole body
+                    if ((text === 'APPLY WITH AUTOFILL' || text === 'APPLY NOW ↗' || text === 'APPLY NOW' || (text.includes('APPLY NOW') && text.length < 20)) && els[i].children.length < 5) {
+                        // Find closest clickable parent
+                        var curr = els[i];
+                        while (curr && curr.tagName !== 'BUTTON' && curr.tagName !== 'A' && curr.getAttribute('role') !== 'button' && curr !== document.body) {
+                            curr = curr.parentElement;
+                        }
+                        if (curr && curr !== document.body) return curr;
+                        return els[i]; // fallback to the element itself
+                    }
+                }
+                return null;
+            """)
+            if btn:
+                print("[INFO] Apply button found via JS text match")
+                # Scroll it into view
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                time.sleep(0.5)
+                return btn
+        except Exception as e:
+            print(f"[DEBUG] JS button search failed: {e}")
+
+        try:
+            btn = WebDriverWait(self.driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, APPLY_NOW_BUTTON_XPATH))
             )
             return btn
@@ -1175,6 +1200,26 @@ class JobrightStrategy:
             print(f"[DEBUG] DOM ATS extraction failed: {e}")
             return None
 
+    def _close_all_other_tabs(self, keep_handle: str = None) -> None:
+        """Close all tabs except the specified one (or the current one)."""
+        try:
+            if keep_handle is None:
+                keep_handle = self.driver.current_window_handle
+            for handle in self.driver.window_handles:
+                if handle != keep_handle:
+                    try:
+                        self.driver.switch_to.window(handle)
+                        self.driver.close()
+                    except Exception:
+                        pass
+            try:
+                self.driver.switch_to.window(keep_handle)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[WARN] Failed to close tabs: {e}")
+
+
     def _get_ats_link_from_job_page(self, job_id: str) -> dict | None:
         """
         Full 6-layer ATS extraction for one job.
@@ -1188,6 +1233,7 @@ class JobrightStrategy:
         """
         job_url = f"{self.base_url}/jobs/info/{job_id}"
         try:
+            self._close_all_other_tabs()
             self.driver.get(job_url)
             p_lo, p_hi = self._step2_page_lo, self._step2_page_hi
             if p_hi < p_lo:
@@ -1234,9 +1280,10 @@ class JobrightStrategy:
                     try:
                         # Check for "Apply without Customizing" button
                         no_customize_xpath = """
-                            //button[contains(@class, 'index_cancelButton')]
-                            | //button[.//p[contains(text(), 'Apply without Customizing')]]
-                            | //button[contains(., 'Apply without Customizing')]
+                            //*[contains(@class, 'index_cancelButton')]
+                            | //*[.//p[contains(text(), 'Apply without Customizing')]]
+                            | //*[contains(., 'Apply without Customizing')]
+                            | //*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply manually')]
                         """
                         no_customize = WebDriverWait(self.driver, 3).until(
                             EC.element_to_be_clickable((By.XPATH, no_customize_xpath))
@@ -1258,10 +1305,23 @@ class JobrightStrategy:
                     if new_handles:
                         # ── Layer 3a: New tab ─────────────────────────────────
                         try:
-                            self.driver.switch_to.window(new_handles[0])
-                            time.sleep(2)
+                            # Always switch to the LAST opened tab (newest)
+                            self.driver.switch_to.window(new_handles[-1])
+                            
+                            # Fast poll for URL stabilization (multi-step ATS redirects)
+                            ats_url = None
+                            for _ in range(12): # Wait up to 6 seconds total (12 * 0.5s)
+                                time.sleep(0.5)
+                                current = self.driver.current_url
+                                if current and current != "about:blank" and not current.startswith("data:"):
+                                    # Wait another second to ensure it's fully stabilized (no more redirects)
+                                    time.sleep(1)
+                                    ats_url = self.driver.current_url
+                                    if ats_url == current:
+                                        break # stabilized
+                            
                             try:
-                                ats_url = self.driver.current_url
+                                ats_url = ats_url or self.driver.current_url
                             except Exception:
                                 ats_url = None
                                 try:
@@ -1288,10 +1348,14 @@ class JobrightStrategy:
                             except Exception:
                                 pass
 
-                        if ats_url and is_likely_ats_url(ats_url):
+                        print(f"[DEBUG] Raw captured new tab URL: {ats_url}")
+                        # If a new tab opened, it's very likely the external ATS. We only need to check it's not internal or blank.
+                        if ats_url and "jobright.ai" not in ats_url.lower() and not ats_url.startswith("about:") and not ats_url.startswith("data:"):
                             platform = detect_ats_platform(ats_url) or "unknown"
                             print(f"[NewTab] {job_url} -> {ats_url}")
                             return {"ats_url": ats_url, "ats_platform": platform}
+                        elif ats_url:
+                            print(f"[DEBUG] Rejected new tab URL: {ats_url}")
 
                     else:
                         # ── Layer 4: Same-tab redirect ────────────────────────
@@ -1566,13 +1630,14 @@ class JobrightStrategy:
         to_process = jobs[:limit] if limit is not None else jobs
         consecutive_failures = 0
 
-        already_done = sum(1 for j in to_process if "ats_url" in j)
+        # Checkpoint: only skip jobs that already have a REAL ats_url value.
+        already_done = sum(1 for j in to_process if j.get("ats_url"))
         remaining    = len(to_process) - already_done
         if already_done:
             print(f"⏭️  Resuming: {already_done}/{len(to_process)} already done, skipping...")
         print(f"🔗 Step 2: Extracting ATS URLs for {remaining} jobs...")
 
-        pending = [j for j in to_process if "ats_url" not in j]
+        pending = [j for j in to_process if not j.get("ats_url")]
         if self._step2_shuffle and len(pending) > 1:
             random.shuffle(pending)
             print(f"🔀 Shuffled {len(pending)} pending jobs")

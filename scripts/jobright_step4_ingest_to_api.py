@@ -63,6 +63,11 @@ def _is_junk_company(name: str) -> bool:
 
 def _build_job_listing(job: dict) -> dict:
     """Build a standard job object for the backend API."""
+    
+    # Strictly require an external ATS URL. Skip insertion if ats_url is null.
+    if not job.get('ats_url'):
+        return None
+        
     title = (job.get('title') or "Unknown Title")[:255]
     company = _clean_company_name(job.get('company') or "Unknown Company")
     location = job.get('location') or ""
@@ -81,7 +86,7 @@ def _build_job_listing(job: dict) -> dict:
         "employment_mode": _normalize_employment_mode(job.get('work_mode')),
         "source": "jobright",
         "source_uid": job.get('job_id'),
-        "job_url": job.get('ats_url') or job.get('jobright_url'),
+        "job_url": job.get('ats_url'),  # Guaranteed to exist now
         "description": job.get('company_description') or job.get('description') or "",
         "status": "open",
         "salary": job.get('salary'),

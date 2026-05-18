@@ -5,12 +5,9 @@
   },
   "_comment": "Jobright.ai scraper config — mirrors hiring_cafe.json structure exactly",
   "search_keywords": [
-    "Python Developer",
     "AI Engineer",
     "Machine Learning Engineer",
     "Data Scientist",
-    "Data Analyst",
-    "Data Engineer",
     "ML Engineer"
   ],
   "location": "United States",

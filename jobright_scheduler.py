@@ -48,13 +48,10 @@ def _utc_now() -> datetime:
 
 def _to_utc_mysql(dt: datetime) -> str:
     if dt.tzinfo is None:
-        import time as _time
-        import calendar
-        local_epoch = calendar.timegm(dt.timetuple())
-        dt = datetime.utcfromtimestamp(local_epoch)
+        dt = dt.astimezone(timezone.utc)
     else:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 def get_next_run_from_cron(cron_expression: str, timezone_str: str = "America/Los_Angeles") -> str:
     now = datetime.now()

@@ -27,7 +27,7 @@ JOBS_FILE   = ROOT / "jobright_jobs.json"
 BY_ATS_FILE = ROOT / "jobright_by_ats.json"
 
 STEP1 = SCRIPTS_DIR / "jobright_step1_extract_urls.py"
-STEP2 = SCRIPTS_DIR / "jobright_step2_extract_ats_urls.py"
+STEP2 = SCRIPTS_DIR / "jobright_step2_parallel.py"
 STEP3 = SCRIPTS_DIR / "jobright_step3_combine_by_ats.py"
 STEP4 = SCRIPTS_DIR / "jobright_step4_ingest_to_api.py"
 
@@ -78,6 +78,30 @@ def _load_jobs(path: Path) -> tuple[dict, list]:
     except Exception:
         return {}, []
 
+def _save_jobs(path: Path, meta: dict, jobs: list) -> None:
+    tmp = str(path) + ".tmp"
+    payload = {**meta, "step": 1, "updated": datetime.now().isoformat(),
+                "count": len(jobs), "jobs": jobs}
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+def _clear_ats_fields(jobs_path: Path) -> int:
+    """Strip stale ats_url/ats_platform so Step 2 processes all fresh jobs."""
+    if not jobs_path.exists():
+        return 0
+    try:
+        meta, jobs = _load_jobs(jobs_path)
+        cleared = sum(1 for j in jobs if "ats_url" in j or "ats_platform" in j)
+        for j in jobs:
+            j.pop("ats_url", None)
+            j.pop("ats_platform", None)
+        _save_jobs(jobs_path, meta, jobs)
+        return cleared
+    except Exception as e:
+        print(f"   ⚠️  Could not clear ATS fields: {e}")
+        return 0
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run_pipeline(args_list=None) -> dict:
     parser = argparse.ArgumentParser(description="Jobright Pipeline Coordinator")
@@ -86,6 +110,7 @@ def run_pipeline(args_list=None) -> dict:
     parser.add_argument("--skip-step3", action="store_true", help="Skip platform grouping")
     parser.add_argument("--skip-step4", action="store_true", help="Skip API ingestion")
     parser.add_argument("--limit", type=int, help="Limit jobs processed in Step 2")
+    parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers in Step 2 (default: 2)")
     parser.add_argument("--no-email", action="store_true", help="Skip sending email report")
     parser.add_argument("--force", action="store_true", help="Force run (used by scheduler)")
     parser.add_argument("--run-name", type=str, help="Optional name for this run")
@@ -138,6 +163,10 @@ def run_pipeline(args_list=None) -> dict:
         if not _run_step("Step 1: Extract Job URLs", STEP1, step1_args):
             return {"status": "error", "error": "Step 1 failed", "jobs_saved": 0, "jobs_found": 0, "timestamp": _now()}
         results["step1"] = "ok"
+        
+        print(f"\n   🧹 Clearing stale ATS fields from previous run...")
+        cleared = _clear_ats_fields(JOBS_FILE)
+        print(f"   📋 ATS fields cleared: {cleared}")
     else:
         print("⏭️  Skipping Step 1 (using existing jobs file)")
         results["step1"] = "skipped"
@@ -146,15 +175,17 @@ def run_pipeline(args_list=None) -> dict:
     # STEP 2: ENRICH (ATS URLS)
     # ─────────────────────────────────────────────────────────
     if not args.skip_step2:
+        if args.reprocess_all:
+            print(f"\n   🧹 Reprocess all: clearing stale ATS fields...")
+            _clear_ats_fields(JOBS_FILE)
+            
         step2_args = []
         if args.limit:
             step2_args += ["--limit", str(args.limit)]
-        if args.visible:
-            step2_args.append("--visible")
-        elif args.headless:
+        if args.headless:
             step2_args.append("--headless")
-        if args.reprocess_all:
-            step2_args.append("--reprocess-all")
+        if args.workers:
+            step2_args += ["--workers", str(args.workers)]
         
         if not _run_step("Step 2: Extract ATS URLs", STEP2, step2_args):
             results["step2"] = "failed"

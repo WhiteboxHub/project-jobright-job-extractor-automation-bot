@@ -1,12 +1,45 @@
+# Virtual Environments
 venv/
+.venv/
+env/
 venvv/
+ENV/
+
+# Python Cache
 __pycache__/
 *.pyc
 *.pyo
-*.tmp
-*.log
-.env
-jobright_jobs.json
-jobright_by_ats.json
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Chrome Profiles & Locks
 chrome_profile/
+chrome_profile_worker*/
+profile.lock
+
+# App Logs & Dumps
 logs/
+*.log
+*.tmp
+*.temp
+
+# Environment Settings
+.env
+.env.local
+
+# Scrapes & Data Payloads (Input / Output)
+jobright_jobs.json
+jobright_jobs.json.tmp
+jobright_by_ats.json
+dry_run_payload.json
+
+# IDE Settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
